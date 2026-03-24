@@ -1,90 +1,115 @@
-# A2A Agent Template
+# MLE-Bench Purple Agent
 
-A minimal template for building [A2A (Agent-to-Agent)](https://a2a-protocol.org/latest/) agents.
+A purple agent for the [AgentX-AgentBeats](https://rdi.berkeley.edu/agentx-agentbeats.html) competition that solves [MLE-bench](https://github.com/openai/mle-bench) Kaggle competitions.
 
-## Project Structure
+## Prerequisites
 
+- Python 3.13+
+- [uv](https://docs.astral.sh/uv/)
+- [Git LFS](https://git-lfs.github.com/) (required for mlebench leaderboard data)
+- Kaggle API credentials (`~/.kaggle/kaggle.json`)
+
+## Setup
+
+### 1. Clone this repo
+
+```bash
+git clone <your-repo-url> mle-bench-purple
+cd mle-bench-purple
+uv sync
 ```
-src/
-├─ server.py      # Server setup and agent card configuration
-├─ executor.py    # A2A request handling
-├─ agent.py       # Your agent implementation goes here
-└─ messenger.py   # A2A messaging utilities
-tests/
-└─ test_agent.py  # Agent tests
-Dockerfile            # Docker configuration
-pyproject.toml        # Python dependencies
-amber-manifest.json5  # Amber manifest
-.github/
-└─ workflows/
-   └─ test-and-publish.yml # CI workflow
+
+### 2. Clone and install mlebench (with Git LFS)
+
+The mlebench package includes leaderboard CSV files tracked by Git LFS. Installing via pip alone will give you LFS pointer files instead of actual data, which breaks grading. You must clone the repo with LFS:
+
+```bash
+brew install git-lfs  # macOS, or see https://git-lfs.github.com/
+cd ..
+git clone https://github.com/openai/mle-bench.git
+cd mle-bench
+git lfs install
+git lfs pull
 ```
 
-## Getting Started
+### 3. Install mlebench into the green agent environment
 
-1. **Create your repository** - Click "Use this template" to create your own repository from this template
+The green agent (evaluator) needs the properly cloned mlebench:
 
-2. **Implement your agent** - Add your agent logic to [`src/agent.py`](src/agent.py)
+```bash
+cd ../mle-bench-green
+uv pip install -e ../mle-bench
+```
 
-3. **Configure your agent card** - Fill in your agent's metadata (name, skills, description) in [`src/server.py`](src/server.py)
+**Important:** If the green agent was previously installed with a pip version of mlebench, the old LFS pointer files may persist in `.venv/`. Fix by copying the real files over:
 
-4. **Fill out your [Amber](https://github.com/RDI-Foundation/amber) manifest** - Update [`amber-manifest.json5`](amber-manifest.json5) to use your agent in Amber scenarios
+```bash
+cp ../mle-bench/mlebench/competitions/spaceship-titanic/leaderboard.csv \
+   .venv/lib/python3.13/site-packages/mlebench/competitions/spaceship-titanic/leaderboard.csv
+```
 
-5. **Write your tests** - Add custom tests for your agent in [`tests/test_agent.py`](tests/test_agent.py)
+### 4. Set up Kaggle credentials
 
-For a concrete example of implementing an agent using this template, see this [draft PR](https://github.com/RDI-Foundation/agent-template/pull/8).
+The green agent needs Kaggle credentials to download competition data. Place your `kaggle.json` at `~/.kaggle`
 
 ## Running Locally
 
-```bash
-# Install dependencies
-uv sync
-
-# Run the server
-uv run src/server.py
-```
-
-## Running with Docker
+### Start the green agent (evaluator)
 
 ```bash
-# Build the image
-docker build -t my-agent .
-
-# Run the container
-docker run -p 9009:9009 my-agent
+cd mle-bench-green
+uv run src/server.py --port 9009
 ```
 
-## Testing
-
-Run A2A conformance tests against your agent.
+### Start the purple agent
 
 ```bash
-# Install test dependencies
-uv sync --extra test
-
-# Start your agent (uv or docker; see above)
-
-# Run tests against your running agent URL
-uv run pytest --agent-url http://localhost:9009
+cd mle-bench-purple
+uv run src/server.py --port 9010
 ```
 
-## Publishing
+### Run an assessment
 
-The repository includes a GitHub Actions workflow that automatically builds, tests, and publishes a Docker image of your agent to GitHub Container Registry.
-
-If your agent needs API keys or other secrets, add them in Settings → Secrets and variables → Actions → Repository secrets. They'll be available as environment variables during CI tests.
-
-- **Push to `main`** → publishes `latest` tag:
-```
-ghcr.io/<your-username>/<your-repo-name>:latest
+```bash
+python test_assessment.py --green-port 9009 --purple-port 9010 --competition spaceship-titanic
 ```
 
-- **Create a git tag** (e.g. `git tag v1.0.0 && git push origin v1.0.0`) → publishes version tags:
+This sends an assessment request to the green agent, which downloads the competition data, sends it to the purple agent, and grades the submission.
+
+## How It Works
+
+### Assessment Flow
+
+1. The **green agent** receives an assessment request with a `competition_id` and the purple agent's URL
+2. It downloads and prepares the Kaggle competition data, tars the public directory, and sends it to the purple agent along with instructions
+3. The **purple agent** receives the tar + instructions, extracts the data, solves the competition, and returns a `submission.csv` as a file artifact
+4. The green agent grades the submission against the competition's test set and leaderboard
+
+### Purple Agent Structure
+
 ```
-ghcr.io/<your-username>/<your-repo-name>:1.0.0
-ghcr.io/<your-username>/<your-repo-name>:1
+src/
+├── server.py      # A2A server config and agent card
+├── agent.py       # Agent logic (this is where the work happens)
+├── executor.py    # A2A request handling (from template)
+└── messenger.py   # A2A messaging utilities (from template)
 ```
 
-Once the workflow completes, find your Docker image in the Packages section (right sidebar of your repository). Configure the package visibility in package settings.
+### Validation
 
-> **Note:** Organization repositories may need package write permissions enabled manually (Settings → Actions → General). Version tags must follow [semantic versioning](https://semver.org/) (e.g., `v1.0.0`).
+The green agent supports submission validation. Before final submission, the purple agent can send a status update with `"validate"` in the text and the CSV attached as a `FilePart`. The green agent will respond with whether the submission format is valid (but not a score).
+
+### Current Status
+
+The skeleton agent submits the `sample_submission.csv` from the competition data as a baseline. The next step is to implement actual ML solving logic (LLM-powered code generation + execution).
+
+## Docker
+
+```bash
+docker build -t mle-bench-purple .
+docker run -p 9010:9010 mle-bench-purple --host 0.0.0.0 --port 9010
+```
+
+## Project Structure
+
+Based on the [RDI Foundation agent template](https://github.com/RDI-Foundation/agent-template).
