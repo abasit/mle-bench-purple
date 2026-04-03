@@ -1,4 +1,6 @@
-FROM ghcr.io/astral-sh/uv:python3.13-bookworm
+FROM nvidia/cuda:12.4.0-cudnn-runtime-bookworm
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
 RUN adduser agent
 USER agent

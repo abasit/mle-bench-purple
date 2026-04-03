@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import io
 import tarfile
@@ -13,8 +14,8 @@ from a2a.types import (
     TaskState,
     TextPart,
 )
-from a2a.utils import new_agent_text_message
 from messenger import Messenger
+from mlevolve_runner import run_competition
 
 logger = logging.getLogger("mle-bench-purple")
 logger.setLevel(logging.DEBUG)
@@ -26,11 +27,31 @@ logger.addHandler(handler)
 class Agent:
     def __init__(self):
         self.messenger = Messenger()
+        self.validation_response: asyncio.Queue = asyncio.Queue()
 
     async def run(self, message: Message, updater: TaskUpdater) -> None:
+        # Check if this is a follow-up message (no tar file)
+        has_tar = any(
+            isinstance(part.root, FilePart) and
+            isinstance(part.root.file, FileWithBytes) and
+            part.root.file.name == "competition.tar.gz"
+            for part in message.parts
+        )
+
+        if not has_tar:
+            # Follow-up message (validation response) — forward to waiting call
+            text = ""
+            for part in message.parts:
+                if isinstance(part.root, TextPart):
+                    text = part.root.text
+            logger.info(f"Validation response received: {text}")
+            await self.validation_response.put(text)
+            return
+
+        # === Main task flow ===
         logger.info("Received task, extracting data...")
 
-        # 1. Parse incoming message: extract instructions text and tar bytes
+        # Parse incoming message
         instructions = ""
         tar_bytes = None
         for part in message.parts:
@@ -42,11 +63,7 @@ class Agent:
                 if isinstance(file_data, FileWithBytes):
                     tar_bytes = base64.b64decode(file_data.bytes)
 
-        if not tar_bytes:
-            logger.info("Error: No competition data received")
-            return
-
-        # 2. Extract tar to working directory (for easy inspection)
+        # Extract tar
         work_dir = Path.cwd() / "work_dir"
         work_dir.mkdir(exist_ok=True)
         with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode='r:gz') as tar:
@@ -55,49 +72,60 @@ class Agent:
 
         data_dir = work_dir / "home" / "data"
 
-        # 3. Read description.md
+        # Read description
         description_path = data_dir / "description.md"
         description = description_path.read_text() if description_path.exists() else "No description found"
         logger.info(f"Read competition description ({len(description)} chars)")
 
-        # 4. List available files
-        all_files = [str(p.relative_to(data_dir)) for p in data_dir.rglob("*") if p.is_file()]
-        logger.info(f"Found {len(all_files)} files: {all_files[:20]}")
+        # Run mlevolve to produce a submission
+        logger.info("Running mlevolve...")
+        loop = asyncio.get_running_loop()
+        submission_bytes = await loop.run_in_executor(
+            None, lambda: run_competition(work_dir)
+        )
 
-        # 5. Find sample submission as baseline
-        sample_submission = None
-        for f in all_files:
-            if "sample" in f.lower() and f.endswith(".csv"):
-                sample_submission = data_dir / f
-                break
+        if submission_bytes is None:
+            logger.warning("mlevolve produced no submission, falling back to sample submission")
+            all_files = [str(p.relative_to(data_dir)) for p in data_dir.rglob("*") if p.is_file()]
+            sample_submission = next(
+                (data_dir / f for f in all_files if "sample" in f.lower() and f.endswith(".csv")),
+                None,
+            )
+            submission_bytes = sample_submission.read_bytes() if sample_submission else b"id,target\n"
 
-        if sample_submission and sample_submission.exists():
-            submission_bytes = sample_submission.read_bytes()
-            logger.info(f"Using sample submission: {sample_submission.name}")
-        else:
-            submission_bytes = b"id,target\n"
-            logger.info("No sample submission found, submitting fallback")
+        # Request validation
+        logger.info("Requesting validation from green agent...")
+        validation_msg = Message(
+            kind="message",
+            role="agent",
+            parts=[
+                Part(root=TextPart(text="validate")),
+                Part(root=FilePart(
+                    file=FileWithBytes(
+                        bytes=base64.b64encode(submission_bytes).decode('ascii'),
+                        name="submission.csv",
+                        mime_type="text/csv",
+                    )
+                ))
+            ],
+            message_id="validation-request",
+        )
+        await updater.update_status(TaskState.working, validation_msg)
 
-        # # 6. Validate submission before final submit
-        # logger.info("Requesting validation from green agent...")
-        # validation_msg = Message(
-        #     kind="message",
-        #     role="agent",
-        #     parts=[
-        #         Part(root=TextPart(text="validate")),
-        #         Part(root=FilePart(
-        #             file=FileWithBytes(
-        #                 bytes=base64.b64encode(submission_bytes).decode('ascii'),
-        #                 name="submission.csv",
-        #                 mime_type="text/csv",
-        #             )
-        #         ))
-        #     ],
-        #     message_id="validation-request",
-        # )
-        # await updater.update_status(TaskState.working, validation_msg)
+        # Wait for validation response
+        logger.info("Waiting for validation response...")
+        try:
+            response = await asyncio.wait_for(self.validation_response.get(), timeout=120)
+            logger.info(f"Validation result: {response}")
+        except asyncio.TimeoutError:
+            logger.info("Validation timed out, submitting anyway")
+            response = "timeout"
 
-        # 7. Submit final artifact
+        # Submit artifact
+        if "invalid" in response.lower() and "timeout" not in response.lower():
+            logger.info(f"Submission invalid: {response}")
+            # TODO: fix and retry
+
         logger.info("Submitting final artifact...")
         await updater.add_artifact(
             parts=[
