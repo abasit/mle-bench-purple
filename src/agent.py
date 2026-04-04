@@ -11,7 +11,6 @@ from a2a.types import (
     FilePart,
     Message,
     Part,
-    TaskState,
     TextPart,
 )
 from messenger import Messenger
@@ -27,7 +26,6 @@ logger.addHandler(handler)
 class Agent:
     def __init__(self):
         self.messenger = Messenger()
-        self.validation_response: asyncio.Queue = asyncio.Queue()
 
     async def run(self, message: Message, updater: TaskUpdater) -> None:
         # Check if this is a follow-up message (no tar file)
@@ -39,16 +37,9 @@ class Agent:
         )
 
         if not has_tar:
-            # Follow-up message (validation response) — forward to waiting call
-            text = ""
-            for part in message.parts:
-                if isinstance(part.root, TextPart):
-                    text = part.root.text
-            logger.info(f"Validation response received: {text}")
-            await self.validation_response.put(text)
+            logger.info("Ignoring follow-up message (no competition tar)")
             return
 
-        # === Main task flow ===
         logger.info("Received task, extracting data...")
 
         # Parse incoming message
@@ -92,39 +83,6 @@ class Agent:
                 None,
             )
             submission_bytes = sample_submission.read_bytes() if sample_submission else b"id,target\n"
-
-        # Request validation
-        logger.info("Requesting validation from green agent...")
-        validation_msg = Message(
-            kind="message",
-            role="agent",
-            parts=[
-                Part(root=TextPart(text="validate")),
-                Part(root=FilePart(
-                    file=FileWithBytes(
-                        bytes=base64.b64encode(submission_bytes).decode('ascii'),
-                        name="submission.csv",
-                        mime_type="text/csv",
-                    )
-                ))
-            ],
-            message_id="validation-request",
-        )
-        await updater.update_status(TaskState.working, validation_msg)
-
-        # Wait for validation response
-        logger.info("Waiting for validation response...")
-        try:
-            response = await asyncio.wait_for(self.validation_response.get(), timeout=120)
-            logger.info(f"Validation result: {response}")
-        except asyncio.TimeoutError:
-            logger.info("Validation timed out, submitting anyway")
-            response = "timeout"
-
-        # Submit artifact
-        if "invalid" in response.lower() and "timeout" not in response.lower():
-            logger.info(f"Submission invalid: {response}")
-            # TODO: fix and retry
 
         logger.info("Submitting final artifact...")
         await updater.add_artifact(

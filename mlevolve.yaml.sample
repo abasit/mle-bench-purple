@@ -3,14 +3,14 @@
 # ============================================================
 agent:
   code:
-    model: gpt-4o
+    model: Qwen/Qwen3-Coder-480B-A35B-Instruct
     temp: 1
-    base_url: ""
+    base_url: "https://api.tokenfactory.nebius.com/v1"
     api_key: ""
   feedback:
-    model: gpt-4o
+    model: Qwen/Qwen3-Coder-480B-A35B-Instruct
     temp: 1
-    base_url: ""
+    base_url: "https://api.tokenfactory.nebius.com/v1"
     api_key: ""
 
   # Run parameters

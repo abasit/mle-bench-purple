@@ -284,11 +284,6 @@ def run(agent, parent_node: SearchNode) -> SearchNode:
                 else:
                     logger.warning(f"All {max_diff_retries} diff attempts failed, will fallback to full rewrite")
 
-        if code is None and total_applied > 0:
-            code = current_code
-            if plan is None:
-                plan = "Partial diff patches applied; continuing with partially fixed code."
-
     if code is None:
         logger.info(f"Falling back to full code rewrite debugging method for node {parent_node.id}")
         prompt_complete = build_prompt_complete(base_instructions, use_full_code_requirement=True)
