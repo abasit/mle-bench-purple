@@ -208,7 +208,8 @@ def run(agent, parent_node: SearchNode) -> SearchNode:
 
                     patcher = SearchReplacePatcher()
                     patched_code, count = patcher.apply_patch(response, parent_node.code, strict=False)
-                    code_changed = count > 0 and patched_code and patched_code != parent_node.code
+                    has_stray_markers = patched_code and ("<<<<<<< SEARCH" in patched_code or ">>>>>>> REPLACE" in patched_code)
+                    code_changed = count > 0 and patched_code and patched_code != parent_node.code and not has_stray_markers
 
                     if code_changed:
                         plan = extract_plan_from_diff_response(response).strip()

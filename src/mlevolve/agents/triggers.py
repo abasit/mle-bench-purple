@@ -15,9 +15,9 @@ def should_check_data_leakage(agent, node: SearchNode) -> bool:
     maximize = agent.metric_maximize
 
     if maximize:
-        is_extreme = (metric_value == 1.0)
+        is_extreme = (metric_value >= 0.95)
     else:
-        is_extreme = (metric_value == 0.0)
+        is_extreme = (metric_value <= 0.05)
 
     if is_extreme:
         logger.info(

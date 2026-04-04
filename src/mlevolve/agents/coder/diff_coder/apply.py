@@ -21,8 +21,6 @@ def apply_diff_with_retry(
     max_retries: int = 3,
     regenerate_fn=None,
 ) -> Tuple[Optional[str], int, str]:
-    current_code = original_code
-    total_applied = 0
     retry_note = ""
     current_response = diff_response
 
@@ -46,22 +44,21 @@ def apply_diff_with_retry(
                     replace_markers = 0
                 has_incomplete_block = search_markers > replace_markers
 
+                # Always patch against clean original — never accumulate across retries
                 patcher = SearchReplacePatcher()
-                updated_code, count = patcher.apply_patch(current_response, current_code, strict=False)
-                if count > 0 and updated_code and updated_code != current_code:
-                    current_code = updated_code
-                    total_applied += count
+                patched_code, count = patcher.apply_patch(current_response, original_code, strict=False)
+                has_stray_markers = patched_code and ("<<<<<<< SEARCH" in patched_code or ">>>>>>> REPLACE" in patched_code)
+                code_changed = count > 0 and patched_code and patched_code != original_code and not has_stray_markers
 
-                if total_applied > 0 and current_code != original_code and not has_incomplete_block:
-                    logger.info(f"Successfully applied {total_applied} diff patch(es)")
-                    return current_code, total_applied, ""
+                if code_changed:
+                    logger.info(f"Successfully applied {count} diff patch(es)")
+                    return patched_code, count, ""
                 else:
-                    if has_incomplete_block and (count > 0 or total_applied > 0):
+                    if has_incomplete_block:
                         retry_note = (
                             "Your previous diff output appears truncated/incomplete "
                             "(missing closing '>>>>>>> REPLACE'). "
-                            f"I have already applied {total_applied} patch(es). "
-                            "Please continue and provide ONLY the remaining patches."
+                            "Please output ALL SEARCH/REPLACE blocks as a complete self-contained patch."
                         )
                     else:
                         retry_note = (
@@ -71,19 +68,16 @@ def apply_diff_with_retry(
 
                     logger.warning(
                         f"Diff attempt {attempt + 1}/{max_retries}: "
-                        f"count={count}, total_applied={total_applied}, "
-                        f"code_changed={current_code != original_code}, "
+                        f"count={count}, code_changed={code_changed}, "
                         f"search_markers={search_markers}, replace_markers={replace_markers}, "
                         f"has_incomplete_block={has_incomplete_block}"
                     )
 
                     if attempt < max_retries - 1 and regenerate_fn:
                         logger.info("Regenerating diff...")
-                        current_response = regenerate_fn(current_code, retry_note)
+                        current_response = regenerate_fn(original_code, retry_note)
                         continue
                     else:
-                        if total_applied > 0:
-                            return current_code, total_applied, retry_note
                         return None, 0, retry_note
             else:
                 retry_note = (
@@ -97,7 +91,7 @@ def apply_diff_with_retry(
 
                 if attempt < max_retries - 1 and regenerate_fn:
                     logger.info("Regenerating diff...")
-                    current_response = regenerate_fn(current_code, retry_note)
+                    current_response = regenerate_fn(original_code, retry_note)
                     continue
                 else:
                     return None, 0, retry_note
@@ -112,13 +106,11 @@ def apply_diff_with_retry(
             if attempt < max_retries - 1 and regenerate_fn:
                 logger.info("Regenerating diff...")
                 try:
-                    current_response = regenerate_fn(current_code, retry_note)
+                    current_response = regenerate_fn(original_code, retry_note)
                 except Exception as retry_e:
                     logger.error(f"Failed to regenerate diff: {retry_e}")
                 continue
             else:
-                if total_applied > 0:
-                    return current_code, total_applied, retry_note
                 return None, 0, retry_note
 
     return None, 0, retry_note

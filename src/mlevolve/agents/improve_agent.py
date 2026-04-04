@@ -238,6 +238,11 @@ def run(agent, parent_node: SearchNode) -> SearchNode:
             "",
             "- Your plan should be concise but comprehensive: Must address WHY/HOW/WHAT (2-4 sentences each). Avoid verbosity - every sentence should add new insight. Natural length: around 8-12 sentences for a complete reasoning process.\n",
             "- Don't suggest to do EDA.\n",
+            "",
+            "⚠️ **CRITICAL: Column/Variable Consistency**",
+            "- If you reference a column or variable, it MUST already exist in the code or be created BEFORE use.",
+            "- When adding new features, ensure the code that CREATES the column comes BEFORE the code that USES it.",
+            "- In diff mode: if your REPLACE block uses a new column, the same REPLACE block (or an earlier one) must create it.",
         ],
     }
 

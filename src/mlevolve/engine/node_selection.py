@@ -77,8 +77,11 @@ def _is_equivalent_expanded(agent, node: SearchNode) -> bool:
     return False
 
 
-def select(agent, node: SearchNode):
+def select(agent, node: SearchNode, _skip_ids: set | None = None):
     """UCT selection: recurse from node, return node to expand (root lock for drafts)."""
+    if _skip_ids is None:
+        _skip_ids = set()
+
     def _best_child(n: SearchNode) -> SearchNode:
         C = _compute_exploration_constant(agent)
         if agent.is_root(n):
@@ -101,13 +104,14 @@ def select(agent, node: SearchNode):
                 node = _best_child(node)
             else:
                 # Skip if an equivalent node in another branch is already expanded
-                if _is_equivalent_expanded(agent, node):
+                # Don't mark terminal — branch may still be useful for evolution/fusion
+                if node.id not in _skip_ids and _is_equivalent_expanded(agent, node):
                     logger.info(
                         f"[select] Skipping {node.id[:8]}: equivalent node "
                         f"already expanded in another branch"
                     )
-                    node.is_terminal = True
-                    return select(agent, agent.virtual_root)
+                    _skip_ids.add(node.id)
+                    return select(agent, agent.virtual_root, _skip_ids=_skip_ids)
                 logger.info(f"[select] → node {node.id} (method=expand)")
                 return node
         else:
