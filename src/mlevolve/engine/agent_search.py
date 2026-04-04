@@ -63,6 +63,13 @@ class AgentSearch:
         self.use_coldstart = cfg.coldstart.use_coldstart
         self.coldstart_description = cfg.coldstart.description
 
+        # Similarity registry for graph-based search
+        from .similarity_registry import SimilarityRegistry
+        self.similarity_registry = SimilarityRegistry(
+            similarity_threshold=self.scfg.similarity_threshold,
+            near_duplicate_threshold=self.scfg.near_duplicate_threshold,
+        )
+
         # Top-N candidates
         self.top_k = self.scfg.top_candidates_size
         self.top_candidates: List[SearchNode] = []

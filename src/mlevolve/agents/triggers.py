@@ -84,3 +84,12 @@ def register_node(agent, node: SearchNode, prompt, parent_node=None, new_branch:
         node.branch_id = parent_node.branch_id
         if node.branch_id in agent.branch_all_nodes:
             agent.branch_all_nodes[node.branch_id].append(node)
+
+    # Register with similarity registry (code-only fingerprint; code_summary added later)
+    if hasattr(agent, 'similarity_registry') and node.code:
+        agent.similarity_registry.register(
+            node_id=node.id,
+            code=node.code,
+            code_summary=node.code_summary,
+            branch_id=node.branch_id,
+        )

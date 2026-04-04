@@ -110,7 +110,7 @@ def determine_metric_direction(agent) -> None:
                 agent.metric_maximize_reasoning = "Default: assuming higher is better (most common case)"
 
 
-def get_review_func_spec(use_memory: bool) -> FunctionSpec:
+def get_review_func_spec() -> FunctionSpec:
     properties = {
         "is_bug": {
             "type": "boolean",
@@ -132,14 +132,12 @@ def get_review_func_spec(use_memory: bool) -> FunctionSpec:
             "type": "boolean",
             "description": "true if the metric should be minimized (i.e. a lower metric value is better, such as with MSE), false if the metric should be maximized (i.e. a higher metric value is better, such as with accuracy).",
         },
-    }
-    required = ["is_bug", "summary", "metric", "lower_is_better"]
-    if use_memory:
-        properties["code_summary"] = {
+        "code_summary": {
             "type": "string",
             "description": "Write a summary including the methods used in each stage of the code, such as data preprocessing, feature engineering, model architecture, etc.",
-        }
-        required.append("code_summary")
+        },
+    }
+    required = ["is_bug", "summary", "metric", "lower_is_better", "code_summary"]
     return FunctionSpec(
         name="submit_review",
         json_schema={"type": "object", "properties": properties, "required": required},
@@ -148,7 +146,6 @@ def get_review_func_spec(use_memory: bool) -> FunctionSpec:
 
 
 def _build_introduction(agent) -> str:
-    use_memory = getattr(agent.acfg, "use_global_memory", False)
     intro = (
         "You are a Kaggle grandmaster attending a competition. "
         "You have written code to solve this task and now need to evaluate the output of the code execution. "
@@ -158,13 +155,10 @@ def _build_introduction(agent) -> str:
         "- \"summary\": (string) A concise 2-3 sentence summary of the execution outcome.\n"
         "- \"metric\": (number or null) The validation metric value as a raw JSON number (e.g. 0.9995), NOT a string. If failed, use null.\n"
         "- \"lower_is_better\": (boolean) true if the metric should be minimized, false if maximized. Must be a JSON boolean (true/false), NOT a string.\n"
+        "- \"code_summary\": (string) A concise method summary of the code, covering key parts such as "
+        "data preprocessing, feature engineering, model architecture/training, and validation strategy.\n"
+        "\nDo NOT omit any field."
     )
-    if use_memory:
-        intro += (
-            "- \"code_summary\": (string) A concise method summary of the code, covering key parts such as "
-            "data preprocessing, feature engineering, model architecture/training, and validation strategy.\n"
-        )
-    intro += "\nDo NOT omit any field."
     return intro
     
 
@@ -183,10 +177,6 @@ def _check_submission_file(agent, node: SearchNode) -> bool:
 
 
 def _save_code_summary(agent, node: SearchNode, response: dict):
-    use_memory = getattr(agent.acfg, "use_global_memory", False)
-    if not use_memory:
-        node.code_summary = None
-        return
     if "code_summary" in response and response["code_summary"]:
         node.code_summary = response["code_summary"]
         logger.info(f"Saved code summary for node {node.id}")
@@ -394,7 +384,7 @@ def run(agent, node: SearchNode, exec_result: ExecutionResult) -> SearchNode:
                 query(
                     system_message=prompt,
                     user_message=None,
-                    func_spec=get_review_func_spec(getattr(agent.acfg, "use_global_memory", False)),
+                    func_spec=get_review_func_spec(),
                     model=agent.acfg.feedback.model,
                     temperature=agent.acfg.feedback.temp,
                     cfg=agent.cfg
@@ -424,6 +414,16 @@ def run(agent, node: SearchNode, exec_result: ExecutionResult) -> SearchNode:
 
             node.analysis = response["summary"]
             _save_code_summary(agent, node, response)
+
+            # Re-register with similarity registry now that code_summary is available
+            if hasattr(agent, 'similarity_registry') and node.code:
+                agent.similarity_registry.register(
+                    node_id=node.id,
+                    code=node.code,
+                    code_summary=node.code_summary,
+                    branch_id=node.branch_id,
+                )
+
             _determine_buggy(node, response, has_csv_submission)
 
             if not node.is_buggy:

@@ -43,6 +43,34 @@ def run(agent, parent_node: SearchNode) -> SearchNode:
         "Memory": parent_node.fetch_child_memory(include_code=False),
         "Instructions": {},
     }
+
+    # Cross-branch insights from equivalent approaches
+    if hasattr(agent, 'similarity_registry'):
+        eq_ids = agent.similarity_registry.get_equivalence_class(parent_node.id)
+        cross_insights = []
+        id2node = {n.id: n for n in agent.journal.nodes}
+        for eq_id in eq_ids:
+            if eq_id == parent_node.id:
+                continue
+            eq_node = id2node.get(eq_id)
+            if eq_node and eq_node.branch_id != parent_node.branch_id:
+                for child in eq_node.children:
+                    if not child.is_buggy and child.metric and child.metric.value is not None:
+                        cross_insights.append(
+                            f"Branch {eq_node.branch_id}: {child.plan[:200] if child.plan else 'N/A'} "
+                            f"→ metric={child.metric.value:.4f}"
+                        )
+                    elif child.is_buggy and child.exc_type:
+                        cross_insights.append(
+                            f"Branch {eq_node.branch_id}: {child.plan[:200] if child.plan else 'N/A'} "
+                            f"→ FAILED ({child.exc_type})"
+                        )
+        if cross_insights:
+            prompt["Cross-Branch Insights"] = (
+                "A similar approach in another branch tried these improvements:\n"
+                + "\n".join(cross_insights[:5])
+            )
+
     prompt["Previous solution"] = {
         "Code": wrap_code(parent_node.code),
     }

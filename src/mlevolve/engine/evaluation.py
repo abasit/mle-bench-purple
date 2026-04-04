@@ -27,6 +27,45 @@ def backpropagate(node: SearchNode, value: float, add_to_tree=True):
         node = node.parent
 
 
+def _propagate_reward_up(node: SearchNode, value: float):
+    """Propagate a reward value up a node's parent chain (visits + total_reward only)."""
+    current = node
+    while current is not None:
+        current.update(value, add=True)
+        current = current.parent
+
+
+def graph_backpropagate(agent, node: SearchNode, value: float, add_to_tree=True):
+    """GBOP-inspired backpropagation: tree backprop + cross-branch reward sharing.
+
+    Per Leurent & Maillard (2020), nodes representing the same state should share
+    value estimates. After normal tree backpropagation, we inject the full reward
+    into equivalent nodes in other branches and propagate up their parent chains.
+    """
+    # Step 1: Normal tree backpropagation
+    backpropagate(node, value, add_to_tree)
+
+    # Step 2: Share reward with equivalent nodes in other branches
+    if not hasattr(agent, 'similarity_registry'):
+        return
+
+    equivalent_ids = agent.similarity_registry.get_equivalence_class(node.id)
+    if len(equivalent_ids) <= 1:
+        return
+
+    id2node = {n.id: n for n in agent.journal.nodes}
+    for eq_id in equivalent_ids:
+        if eq_id == node.id:
+            continue
+        eq_node = id2node.get(eq_id)
+        if eq_node and eq_node.branch_id != node.branch_id:
+            logger.info(
+                f"[graph-backprop] {node.id[:8]} → {eq_id[:8]} "
+                f"(branch {node.branch_id}→{eq_node.branch_id}, reward={value})"
+            )
+            _propagate_reward_up(eq_node, value)
+
+
 def get_node_reward(agent, node: SearchNode):
     reward = 0
 
@@ -129,7 +168,7 @@ def check_improvement(agent, cur_node: SearchNode, parent_node: SearchNode):
                         logger.info(f"  └─ Set as local_best: {cur_node.metric.value:.4f}")
 
                 reward = get_node_reward(agent, cur_node)
-                backpropagate(cur_node, reward)
+                graph_backpropagate(agent, cur_node, reward)
                 return True
 
     local_best_node = cur_node.local_best_node
@@ -187,7 +226,7 @@ def check_improvement(agent, cur_node: SearchNode, parent_node: SearchNode):
 
     if should_backpropagate:
         reward = get_node_reward(agent, cur_node)
-        backpropagate(cur_node, reward)
+        graph_backpropagate(agent, cur_node, reward)
     else:
         agent.current_node_list.append(cur_node)
     return should_backpropagate

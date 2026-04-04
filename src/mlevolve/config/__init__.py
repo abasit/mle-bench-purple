@@ -77,6 +77,8 @@ class SearchConfig:
     fusion_max_time_hours: float
     fusion_min_successful_nodes: int
     fusion_min_branches: int
+    similarity_threshold: float = 0.6
+    near_duplicate_threshold: float = 0.8
 
 @dataclass
 class AgentConfig:

@@ -1,6 +1,7 @@
 """Node selection: UCT select, get_exploration_weight, get_top_k_nodes_global, select_from_top_k_weighted, select_with_soft_switch."""
 
 import logging
+import math
 import random
 import time
 from typing import List
@@ -37,6 +38,45 @@ def _compute_exploration_constant(agent):
     )
 
 
+def _class_uct_value(child: SearchNode, C: float, agent) -> float:
+    """UCT using aggregated visits/rewards across equivalence class.
+
+    Per GBOP (Leurent & Maillard 2020), merging equivalent states gives
+    tighter value bounds by pooling observations.
+    """
+    if not hasattr(agent, 'similarity_registry'):
+        return child.uct_value(exploration_constant=C)
+
+    class_visits, class_reward = agent.similarity_registry.get_class_stats(
+        child.id, agent.journal
+    )
+    if class_visits == 0:
+        return float('inf')
+    exploitation = class_reward / class_visits
+    parent_visits = child.parent.visits if child.parent else 1
+    if parent_visits <= 0:
+        parent_visits = 1
+    exploration = C * math.sqrt(math.log(parent_visits) / class_visits)
+    return exploitation + exploration
+
+
+def _is_equivalent_expanded(agent, node: SearchNode) -> bool:
+    """Check if any equivalent node in another branch already has children."""
+    if not hasattr(agent, 'similarity_registry'):
+        return False
+    eq_ids = agent.similarity_registry.get_equivalence_class(node.id)
+    if len(eq_ids) <= 1:
+        return False
+    id2node = {n.id: n for n in agent.journal.nodes}
+    for eq_id in eq_ids:
+        if eq_id == node.id:
+            continue
+        eq_node = id2node.get(eq_id)
+        if eq_node and eq_node.branch_id != node.branch_id and len(eq_node.children) > 0:
+            return True
+    return False
+
+
 def select(agent, node: SearchNode):
     """UCT selection: recurse from node, return node to expand (root lock for drafts)."""
     def _best_child(n: SearchNode) -> SearchNode:
@@ -46,12 +86,12 @@ def select(agent, node: SearchNode):
             selected_node = n
             if len(filtered_children) > 0:
                 selected_node = max(filtered_children,
-                                    key=lambda child: child.uct_value(exploration_constant=C))
+                                    key=lambda child: _class_uct_value(child, C, agent))
             if selected_node.stage in ["draft", "fusion_draft"]:
                 selected_node.lock = True
             return selected_node
         else:
-            return max(n.children, key=lambda child: child.uct_value(exploration_constant=C))
+            return max(n.children, key=lambda child: _class_uct_value(child, C, agent))
 
     while node and not node.is_terminal:
         if not node.reached_child_limit(scfg=agent.scfg):
@@ -60,6 +100,14 @@ def select(agent, node: SearchNode):
             elif node.continue_improve and len(node.children) > 0:
                 node = _best_child(node)
             else:
+                # Skip if an equivalent node in another branch is already expanded
+                if _is_equivalent_expanded(agent, node):
+                    logger.info(
+                        f"[select] Skipping {node.id[:8]}: equivalent node "
+                        f"already expanded in another branch"
+                    )
+                    node.is_terminal = True
+                    return select(agent, agent.virtual_root)
                 logger.info(f"[select] → node {node.id} (method=expand)")
                 return node
         else:

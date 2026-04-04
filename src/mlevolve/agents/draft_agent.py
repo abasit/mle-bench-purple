@@ -66,6 +66,15 @@ def run(agent, init_solution_path: Optional[str] = None) -> SearchNode:
         "Memory": agent.virtual_root.fetch_child_memory(),
         "Instructions": {},
     }
+
+    # Inject global approach landscape from similarity registry
+    if hasattr(agent, 'similarity_registry'):
+        landscape = agent.similarity_registry.get_approach_landscape()
+        if landscape:
+            prompt["Explored Approaches"] = (
+                "The following approach clusters have already been explored across all branches. "
+                "Your solution MUST use a DIFFERENT approach than these:\n" + landscape
+            )
     prompt["Instructions"] |= prompt_resp_fmt()
 
     prompt["Instructions"] |= {

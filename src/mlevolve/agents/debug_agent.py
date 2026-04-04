@@ -168,14 +168,12 @@ def run(agent, parent_node: SearchNode) -> SearchNode:
         )
         diff_instructions += f"Response format: {DIFF_SYS_FORMAT}"
 
-        current_code = parent_node.code
-        total_applied = 0
         retry_note = ""
         for retry_idx in range(max_diff_retries):
             try:
                 logger.info(f"Attempting diff method (retry {retry_idx + 1}/{max_diff_retries}) for node {parent_node.id}")
                 try:
-                    prompt["Previous (buggy) implementation"] = current_code
+                    prompt["Previous (buggy) implementation"] = parent_node.code
                 except Exception:
                     pass
 
@@ -184,8 +182,7 @@ def run(agent, parent_node: SearchNode) -> SearchNode:
                     diff_instructions_retry += (
                         "\n\n🔁 **RETRY NOTE (IMPORTANT)**:\n"
                         f"{retry_note}\n"
-                        "Now output ONLY the remaining SEARCH/REPLACE blocks needed to finish. "
-                        "Do NOT repeat already-applied blocks. "
+                        "Please output ALL SEARCH/REPLACE blocks needed as a complete patch. "
                         "Keep SEARCH minimal and ensure every block is complete.\n"
                     )
 
@@ -210,12 +207,10 @@ def run(agent, parent_node: SearchNode) -> SearchNode:
                     has_incomplete_block = search_markers > replace_markers
 
                     patcher = SearchReplacePatcher()
-                    updated_code, count = patcher.apply_patch(response, current_code, strict=False)
-                    if count > 0 and updated_code and updated_code != current_code:
-                        current_code = updated_code
-                        total_applied += count
+                    patched_code, count = patcher.apply_patch(response, parent_node.code, strict=False)
+                    code_changed = count > 0 and patched_code and patched_code != parent_node.code
 
-                    if total_applied > 0 and current_code and current_code != parent_node.code and not has_incomplete_block:
+                    if code_changed and not has_incomplete_block:
                         plan = extract_plan_from_diff_response(response).strip()
                         if not plan:
                             error_parts = []
@@ -229,19 +224,18 @@ def run(agent, parent_node: SearchNode) -> SearchNode:
                                 error_parts.append("I will debug the code to fix the bug.")
                             plan = " | ".join(error_parts)
 
-                        code = current_code
+                        code = patched_code
                         prompt_complete = prompt_with_diff
                         logger.info(
-                            f"Successfully applied {total_applied} diff patch(es) for node {parent_node.id} "
-                            f"(last attempt applied={count}, retry {retry_idx + 1}/{max_diff_retries})"
+                            f"Successfully applied {count} diff patch(es) for node {parent_node.id} "
+                            f"(retry {retry_idx + 1}/{max_diff_retries})"
                         )
                         break
                     else:
-                        if has_incomplete_block and (count > 0 or total_applied > 0):
+                        if has_incomplete_block:
                             retry_note = (
                                 "Your previous diff output appears truncated/incomplete (missing closing '>>>>>>> REPLACE'). "
-                                f"I have already applied {total_applied} patch(es) to the code. "
-                                "Please continue and provide ONLY the remaining patches."
+                                "Please output ALL SEARCH/REPLACE blocks as a complete self-contained patch."
                             )
                         else:
                             retry_note = (
@@ -250,8 +244,7 @@ def run(agent, parent_node: SearchNode) -> SearchNode:
                             )
                         logger.warning(
                             f"Diff patch attempt {retry_idx + 1}/{max_diff_retries}: "
-                            f"count={count}, total_applied={total_applied}, "
-                            f"code_changed={current_code != parent_node.code if current_code else False}, "
+                            f"count={count}, code_changed={code_changed}, "
                             f"search_markers={search_markers}, replace_markers={replace_markers}, "
                             f"has_incomplete_block={has_incomplete_block}"
                         )

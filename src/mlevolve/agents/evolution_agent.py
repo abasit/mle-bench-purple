@@ -61,6 +61,29 @@ def run(agent, parent_node: SearchNode) -> SearchNode:
         "Branch Evolution History": branch_trajectory,
         "Instructions": {},
     }
+
+    # Cross-branch insights from equivalent approaches
+    if hasattr(agent, 'similarity_registry'):
+        eq_ids = agent.similarity_registry.get_equivalence_class(parent_node.id)
+        cross_insights = []
+        id2node = {n.id: n for n in agent.journal.nodes}
+        for eq_id in eq_ids:
+            if eq_id == parent_node.id:
+                continue
+            eq_node = id2node.get(eq_id)
+            if eq_node and eq_node.branch_id != parent_node.branch_id:
+                eq_trajectory = eq_node.get_root_to_current_trajectory(max_steps=5)
+                if eq_trajectory and eq_trajectory.strip():
+                    cross_insights.append(
+                        f"Branch {eq_node.branch_id} (metric={eq_node.metric.value if eq_node.metric and eq_node.metric.value else 'N/A'}):\n"
+                        f"{eq_trajectory[:500]}"
+                    )
+        if cross_insights:
+            prompt["Cross-Branch Evolution History"] = (
+                "Similar approaches in other branches followed these trajectories:\n\n"
+                + "\n---\n".join(cross_insights[:3])
+            )
+
     prompt["Previous solution"] = {
         "Code": wrap_code(parent_node.code),
     }
