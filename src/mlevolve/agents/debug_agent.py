@@ -210,7 +210,7 @@ def run(agent, parent_node: SearchNode) -> SearchNode:
                     patched_code, count = patcher.apply_patch(response, parent_node.code, strict=False)
                     code_changed = count > 0 and patched_code and patched_code != parent_node.code
 
-                    if code_changed and not has_incomplete_block:
+                    if code_changed:
                         plan = extract_plan_from_diff_response(response).strip()
                         if not plan:
                             error_parts = []
