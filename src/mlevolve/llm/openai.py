@@ -119,11 +119,13 @@ def query(
     if "enable_thinking" in profile:
         extra_body["enable_thinking"] = profile["enable_thinking"]
 
+    _max_tok_val = filtered.get("max_tokens", 16384)
+    _max_tok_key = "max_completion_tokens" if (model or "").lower().startswith("gpt") else "max_tokens"
     params: dict[str, Any] = {
         "model": model,
         "messages": messages,
         "temperature": profile.get("temperature", filtered.get("temperature", 1.0)),
-        "max_tokens": filtered.get("max_tokens", 16384),
+        _max_tok_key: _max_tok_val,
     }
     if "top_p" in profile:
         params["top_p"] = profile["top_p"]
@@ -241,11 +243,13 @@ def generate(
     if "enable_thinking" in profile:
         extra_body["enable_thinking"] = profile["enable_thinking"]
 
+    _max_tok_val = max_tokens if max_tokens is not None else 16384
+    _max_tok_key = "max_completion_tokens" if (model or "").lower().startswith("gpt") else "max_tokens"
     params: dict[str, Any] = {
         "model": model,
         "messages": messages,
         "temperature": profile.get("temperature", temperature if temperature is not None else 1.0),
-        "max_tokens": max_tokens if max_tokens is not None else 16384,
+        _max_tok_key: _max_tok_val,
         "stream": True,
     }
     if "top_p" in profile:

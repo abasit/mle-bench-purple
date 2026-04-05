@@ -25,9 +25,12 @@ def validate_executed_node(agent, node: SearchNode):
 
     submission_path = agent.cfg.workspace_dir / "submission" / f"submission_{node.id}.csv"
     if not submission_path.exists():
+        # result_parse_agent._check_submission_file already ran a broad workspace search
+        # and would have moved the file to submission_path if it existed anywhere.
+        # If it's still not here, the code genuinely didn't produce a submission.
         node.is_buggy = True
         node.metric = WorstMetricValue()
-        logger.info(f"Node {node.id} did not produce a submission.csv")
+        logger.info(f"Node {node.id} did not produce a submission.csv (confirmed missing after broad search)")
         return
 
     if node.metric.maximize and node.metric.value == 0.0:

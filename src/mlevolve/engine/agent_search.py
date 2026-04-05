@@ -63,6 +63,16 @@ class AgentSearch:
         self.use_coldstart = cfg.coldstart.use_coldstart
         self.coldstart_description = cfg.coldstart.description
 
+        # Competition category for type-specific improvement hints
+        self.competition_category = "Unknown"
+        if self.use_coldstart:
+            try:
+                from ..engine.coldstart import get_task_category
+                self.competition_category = get_task_category(cfg)
+                logger.info(f"[AgentSearch] Competition category: {self.competition_category}")
+            except Exception:
+                pass
+
         # Similarity registry for graph-based search
         from .similarity_registry import SimilarityRegistry
         self.similarity_registry = SimilarityRegistry(
@@ -136,6 +146,22 @@ class AgentSearch:
     def is_root(self, node: SearchNode):
         return node.id is self.virtual_root.id
 
+    # ── Time-budget helpers ──────────────────────────────────────────────
+
+    def _time_remaining(self) -> float:
+        """Seconds remaining in the search budget (0 if not yet started)."""
+        if self.search_start_time is None:
+            return self.acfg.time_limit
+        return max(0.0, self.acfg.time_limit - (time.time() - self.search_start_time))
+
+    def _late_stage_budget(self) -> int:
+        """Budget guard in seconds below which expensive operations are skipped."""
+        return int(getattr(self.acfg, 'late_stage_time_budget', 900))
+
+    def _can_run_expensive_op(self) -> bool:
+        """True if there is enough budget for aggregation / cross-branch fusion."""
+        return self._time_remaining() > self._late_stage_budget()
+
     def _run_single_step(
         self,
         parent_node: SearchNode,
@@ -151,14 +177,22 @@ class AgentSearch:
             try:
                 if self.is_root(parent_node):
                     if parent_node.reached_child_limit(scfg=self.scfg):
-                        logger.info("🎯 Regular draft limit reached, triggering multi-branch aggregation (conditions already checked in select())")
-                        result_node = aggregation_agent.run(self, mode="node", parent_node=parent_node)
-                        if result_node:
-                            result_node.lock = True
-                            logger.info(f"[_run_single_step] Aggregation branch node {result_node.id} is locked.")
-                        else:
-                            logger.info("Aggregation failed or limit reached, skipping. Will continue normal search.")
+                        if not self._can_run_expensive_op():
+                            # Not enough budget to synthesise a new aggregation draft — skip.
+                            logger.info(
+                                f"⏰ Skipping aggregation: only {self._time_remaining():.0f}s "
+                                f"remaining (budget guard = {self._late_stage_budget()}s)"
+                            )
                             result_node = None
+                        else:
+                            logger.info("🎯 Regular draft limit reached, triggering multi-branch aggregation (conditions already checked in select())")
+                            result_node = aggregation_agent.run(self, mode="node", parent_node=parent_node)
+                            if result_node:
+                                result_node.lock = True
+                                logger.info(f"[_run_single_step] Aggregation branch node {result_node.id} is locked.")
+                            else:
+                                logger.info("Aggregation failed or limit reached, skipping. Will continue normal search.")
+                                result_node = None
                     else:
                         result_node = draft_agent.run(self, init_solution_path=init_solution_path)
                         result_node.lock = True
@@ -167,10 +201,13 @@ class AgentSearch:
                     result_node = debug_agent.run(self, parent_node)
 
                 elif parent_node.is_buggy is False:
+                    # Cross-branch fusion is expensive; only allow it when:
+                    #   (a) at least half the time budget has elapsed, AND
+                    #   (b) sufficient time remains (budget guard).
                     can_use_fusion = False
                     if self.search_start_time:
                         elapsed_time = time.time() - self.search_start_time
-                        if elapsed_time >= self.acfg.time_limit / 2:
+                        if elapsed_time >= self.acfg.time_limit / 2 and self._can_run_expensive_op():
                             can_use_fusion = True
                     is_from_topk = getattr(parent_node, '_topk_triggered', False)
                     stagnation_threshold = self.scfg.topk_stagnation_threshold if is_from_topk else self.scfg.branch_stagnation_threshold
@@ -180,13 +217,13 @@ class AgentSearch:
                     if is_branch_stagnant(self, parent_node.branch_id, threshold=stagnation_threshold):
                         if can_use_fusion:
                             if random.random() < self.acfg.fusion_vs_evolution_prob:
-                                logger.info(f"🎯 Triggering fusion for stagnant node {parent_node.id} (after 6h)")
+                                logger.info(f"🎯 Triggering fusion for stagnant node {parent_node.id}")
                                 result_node = fusion_agent.run(self, parent_node)
                             else:
-                                logger.info(f"🎯 Triggering intra-branch evolution for stagnant node {parent_node.id} (after 6h)")
+                                logger.info(f"🎯 Triggering intra-branch evolution for stagnant node {parent_node.id}")
                                 result_node = evolution_agent.run(self, parent_node)
                         else:
-                            logger.info(f"🔄 Using evolution for stagnant node {parent_node.id} (before 6h)")
+                            logger.info(f"🔄 Using evolution for stagnant node {parent_node.id} (fusion budget guard or early phase)")
                             result_node = evolution_agent.run(self, parent_node)
                     else:
                         logger.info(f"🔄 Using normal improve for node {parent_node.id}")
@@ -198,6 +235,8 @@ class AgentSearch:
                 if result_node:
                     if init_solution_path:
                         logger.info(f"Node {result_node.id} from init_solution, skipping code review")
+                    elif not getattr(self.acfg, 'use_code_review', True):
+                        logger.info(f"Node {result_node.id} code review disabled by config")
                     else:
                         reviewed_code = code_review_agent.run(self, result_node)
                         if reviewed_code.strip() != result_node.code.strip():

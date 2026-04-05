@@ -231,15 +231,19 @@ def update_best_solution(agent, node):
 
     if agent.best_node is None or agent.best_node.metric < node.metric:
         if agent.best_node is None or node.is_valid is True:
+            prev_val = agent.best_node.metric.value if agent.best_node is not None else None
             agent.best_node = node
             save_best_solution(agent, node, submission_file_path)
             logger.info(f"[best] updated: node {node.id}, metric={node.metric.value}")
+            print(f"\n*** BEST METRIC CHANGED: {prev_val} -> {node.metric.value} (node {node.id}, stage={node.stage}) ***\n", flush=True)
         else:
             logger.debug(f"Node {node.id} is invalid, skipped")
     else:
         if agent.best_node.is_valid is False:
+            prev_val = agent.best_node.metric.value
             agent.best_node = node
             save_best_solution(agent, node, submission_file_path)
             logger.info(f"[best] updated: node {node.id}, metric={node.metric.value}")
+            print(f"\n*** BEST METRIC CHANGED: {prev_val} -> {node.metric.value} (node {node.id}, stage={node.stage}) ***\n", flush=True)
         else:
             logger.debug(f"Node {node.id} not the best (current best: {agent.best_node.id})")

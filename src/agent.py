@@ -11,8 +11,10 @@ from a2a.types import (
     FilePart,
     Message,
     Part,
+    TaskState,
     TextPart,
 )
+from a2a.utils import new_agent_text_message
 from messenger import Messenger
 from mlevolve_runner import run_competition
 
@@ -68,6 +70,11 @@ class Agent:
         description = description_path.read_text() if description_path.exists() else "No description found"
         logger.info(f"Read competition description ({len(description)} chars)")
 
+        await updater.update_status(
+            state=TaskState.working,
+            message=new_agent_text_message("Competition data ready. Starting MLEvolve tree search..."),
+        )
+
         # Run mlevolve to produce a submission
         logger.info("Running mlevolve...")
         loop = asyncio.get_running_loop()
@@ -77,12 +84,23 @@ class Agent:
 
         if submission_bytes is None:
             logger.warning("mlevolve produced no submission, falling back to sample submission")
+            await updater.update_status(
+                state=TaskState.working,
+                message=new_agent_text_message(
+                    "Warning: MLEvolve produced no valid submission. Falling back to sample submission."
+                ),
+            )
             all_files = [str(p.relative_to(data_dir)) for p in data_dir.rglob("*") if p.is_file()]
             sample_submission = next(
                 (data_dir / f for f in all_files if "sample" in f.lower() and f.endswith(".csv")),
                 None,
             )
             submission_bytes = sample_submission.read_bytes() if sample_submission else b"id,target\n"
+        else:
+            await updater.update_status(
+                state=TaskState.working,
+                message=new_agent_text_message("MLEvolve search complete. Submitting best solution..."),
+            )
 
         logger.info("Submitting final artifact...")
         await updater.add_artifact(

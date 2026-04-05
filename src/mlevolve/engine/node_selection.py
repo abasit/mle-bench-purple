@@ -6,6 +6,8 @@ import random
 import time
 from typing import List
 
+import numpy as np
+
 from .search_node import SearchNode
 from .conditions import should_trigger_branch_fusion
 logger = logging.getLogger("MLEvolve")
@@ -38,11 +40,36 @@ def _compute_exploration_constant(agent):
     )
 
 
+def _novelty_bonus(child: SearchNode, agent, weight: float = 0.25) -> float:
+    """Novelty bonus for UCT: unexplored approach families get a small additive boost.
+
+    Uses the similarity registry's Jaccard-based novelty score (0 = common approach,
+    1 = totally novel).  Multiplied by ``weight`` so the bonus is bounded and does
+    not overwhelm the exploitation term.
+
+    Rationale: standard UCT treats all unvisited nodes equally via the inf/explore
+    term, but once a node is visited, it loses that boost even if its approach family
+    is still largely unexplored.  The novelty bonus gives a persistent, small incentive
+    to favour structurally diverse nodes over near-duplicate approaches.
+    """
+    if not hasattr(agent, 'similarity_registry'):
+        return 0.0
+    novelty = agent.similarity_registry.get_novelty_score(
+        child.code, getattr(child, 'code_summary', None)
+    )
+    return weight * novelty
+
+
 def _class_uct_value(child: SearchNode, C: float, agent) -> float:
-    """UCT using aggregated visits/rewards across equivalence class.
+    """UCT using aggregated visits/rewards across equivalence class + novelty bonus.
 
     Per GBOP (Leurent & Maillard 2020), merging equivalent states gives
     tighter value bounds by pooling observations.
+
+    The novelty bonus (see ``_novelty_bonus``) adds a small persistent
+    incentive to explore structurally diverse approaches even after they
+    have been visited, preventing the search from converging prematurely
+    on a single model family.
     """
     if not hasattr(agent, 'similarity_registry'):
         return child.uct_value(exploration_constant=C)
@@ -57,7 +84,8 @@ def _class_uct_value(child: SearchNode, C: float, agent) -> float:
     if parent_visits <= 0:
         parent_visits = 1
     exploration = C * math.sqrt(math.log(parent_visits) / class_visits)
-    return exploitation + exploration
+    novelty = _novelty_bonus(child, agent)
+    return exploitation + exploration + novelty
 
 
 def _is_equivalent_expanded(agent, node: SearchNode) -> bool:
@@ -88,8 +116,21 @@ def select(agent, node: SearchNode, _skip_ids: set | None = None):
             filtered_children = [child for child in n.children if not child.lock]
             selected_node = n
             if len(filtered_children) > 0:
-                selected_node = max(filtered_children,
-                                    key=lambda child: _class_uct_value(child, C, agent))
+                # Thompson Sampling at draft level: sample from Beta(alpha, beta) per branch.
+                # Handles sparse data better than UCT — ideal early in the search when
+                # each branch has been visited only a handful of times.
+                selected_node = max(
+                    filtered_children,
+                    key=lambda child: np.random.beta(child.alpha, child.beta),
+                )
+                logger.debug(
+                    f"[TS] draft selection: "
+                    + ", ".join(
+                        f"{c.id[:6]}(α={c.alpha},β={c.beta})"
+                        for c in filtered_children
+                    )
+                    + f" → {selected_node.id[:6]}"
+                )
             if selected_node.stage in ["draft", "fusion_draft"]:
                 selected_node.lock = True
             return selected_node

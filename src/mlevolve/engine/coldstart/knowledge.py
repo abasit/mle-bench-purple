@@ -57,6 +57,15 @@ def get_init_solution_paths(exp_id: str) -> List[str]:
         return []
 
 
+def get_task_category(cfg: Any) -> str:
+    """Return the competition category string (e.g. 'NLP', 'Tabular', 'General Image')."""
+    try:
+        tasks = _load_json(cfg.coldstart.task_json_path)
+        return tasks.get(cfg.exp_id, "Unknown")
+    except Exception:
+        return "Unknown"
+
+
 def build_guidance_description(cfg: Any) -> str:
 
     tasks = _load_json(cfg.coldstart.task_json_path)

@@ -13,16 +13,29 @@ def should_check_data_leakage(agent, node: SearchNode) -> bool:
 
     metric_value = node.metric.value
     maximize = agent.metric_maximize
+    threshold = getattr(agent.acfg, 'data_leakage_threshold', 0.95)
 
     if maximize:
-        is_extreme = (metric_value >= 0.95)
+        is_extreme = (metric_value >= threshold)
     else:
-        is_extreme = (metric_value <= 0.05)
+        is_extreme = (metric_value <= (1.0 - threshold))
+
+    # Also check for suspiciously large jump vs parent
+    if not is_extreme and node.parent and node.parent.metric and node.parent.metric.value is not None:
+        parent_val = node.parent.metric.value
+        if parent_val > 0:
+            relative_jump = (metric_value - parent_val) / abs(parent_val) if maximize else (parent_val - metric_value) / abs(parent_val)
+            if relative_jump > 0.20:  # >20% single-step improvement is suspicious
+                is_extreme = True
+                logger.info(
+                    f"Node {node.id} triggers data leakage check: "
+                    f"suspicious jump {parent_val:.4f} → {metric_value:.4f} ({relative_jump:+.1%})"
+                )
 
     if is_extreme:
         logger.info(
             f"Node {node.id} triggers data leakage check: "
-            f"extreme value {metric_value} (maximize={maximize})"
+            f"extreme value {metric_value:.4f} (threshold={threshold}, maximize={maximize})"
         )
     return is_extreme
 

@@ -99,20 +99,52 @@ class Interpreter:
         return self.current_parallel_run < self.max_parallel_run
 
     def isolate_submission_path(self, code: str, _id) -> str:
-        """Per-process submission filename to avoid write conflicts."""
+        """Per-process submission filename to avoid write conflicts.
+
+        Rewrites common submission path patterns so each parallel run saves to
+        its own file (submission_{id}.csv) under the submission/ directory.
+        A broad fallback in _check_submission_file handles any patterns missed here.
+        """
         target = f"submission_{_id}.csv"
+        target_path = f"submission/{target}"
 
-        code = code.replace("submission/submission.csv", f"submission/{target}")
-        code = code.replace("/submission.csv", f"/{target}")
+        # --- Exact directory-qualified patterns (highest priority, most specific first) ---
+        code = code.replace("submission/submission.csv", target_path)
+        code = code.replace("./submission/submission.csv", f"./{target_path}")
 
-        for quote in ("'", '"'):
+        # os.path.join variants
+        for q in ("'", '"'):
             code = code.replace(
-                f"to_csv({quote}submission.csv",
-                f"to_csv({quote}submission/{target}",
+                f"os.path.join({q}submission{q}, {q}submission.csv{q})",
+                f"{q}{target_path}{q}",
+            )
+            code = code.replace(
+                f"os.path.join({q}./submission{q}, {q}submission.csv{q})",
+                f"{q}./{target_path}{q}",
+            )
+            # Path() / pathlib variants
+            code = code.replace(
+                f"Path({q}submission{q}) / {q}submission.csv{q}",
+                f"Path({q}{target_path}{q})",
+            )
+            code = code.replace(
+                f"Path({q}./submission{q}) / {q}submission.csv{q}",
+                f"Path({q}./{target_path}{q})",
             )
 
-        for quote in ("'", '"'):
-            code = code.replace(f"{quote}submission.csv{quote}", f"{quote}{target}{quote}")
+        # to_csv("submission.csv") without directory — redirect into submission/
+        for q in ("'", '"'):
+            code = code.replace(
+                f"to_csv({q}submission.csv",
+                f"to_csv({q}{target_path}",
+            )
+
+        # Bare filename in quotes anywhere else (e.g. variable assignment)
+        for q in ("'", '"'):
+            code = code.replace(f"{q}submission.csv{q}", f"{q}{target_path}{q}")
+
+        # /submission.csv suffix pattern (path built via string concatenation)
+        code = code.replace("/submission.csv", f"/{target}")
 
         return code
     
@@ -154,8 +186,8 @@ class Interpreter:
         return modified_code
     
     def cleanup_session(self, process_id: int = -1) -> None:
-        """Clean up resources for the given process slot."""
-        pass
+        """Kill all active subprocesses (delegates to terminate_all_subprocesses)."""
+        self.terminate_all_subprocesses()
 
     def run(self, code: str, id, reset_session=True, working_dir: str | None = None):
         """

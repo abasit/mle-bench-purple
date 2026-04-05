@@ -100,6 +100,11 @@ class AgentConfig:
     search: SearchConfig
     decay: DecayConfig
     use_diff_mode: bool = True
+    timeout_grace_period: int = 120
+    data_leakage_threshold: float = 0.95
+    k_fold_validation: int = 0
+    use_code_review: bool = False  # off by default; debug agent handles errors at exec time
+    late_stage_time_budget: int = 900  # seconds; skip expensive ops below this threshold
 
 
 @dataclass

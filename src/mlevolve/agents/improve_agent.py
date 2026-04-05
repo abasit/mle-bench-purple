@@ -71,6 +71,13 @@ def run(agent, parent_node: SearchNode) -> SearchNode:
                 + "\n".join(cross_insights[:5])
             )
 
+    # Competition-type-specific technique hints
+    competition_category = getattr(agent, 'competition_category', None)
+    if competition_category:
+        type_hints = _get_competition_type_hints(competition_category)
+        if type_hints:
+            prompt["Competition-Specific Techniques"] = type_hints
+
     prompt["Previous solution"] = {
         "Code": wrap_code(parent_node.code),
     }
@@ -84,7 +91,7 @@ def run(agent, parent_node: SearchNode) -> SearchNode:
             trigger_reason.append(f"success_patience={success_patience}>=2")
         if total_patience >= 5:
             trigger_reason.append(f"total_patience={total_patience}>=5")
-        logger.warning(f"🔥 PLATEAU DETECTED! Triggered by: {' AND '.join(trigger_reason)}, using Magnitude-Based prompt")
+        logger.warning(f"🔥 PLATEAU DETECTED! Triggered by: {' AND '.join(trigger_reason)}, using Magnitude-Based + HPO prompt")
         if branch_best_score is None:
             best_score_str = "N/A (no successful nodes yet)"
         else:
@@ -133,6 +140,29 @@ def run(agent, parent_node: SearchNode) -> SearchNode:
                 "- Which Tier you're using and why",
                 "- What specific components will change",
                 "- Why this addresses the root cause of the plateau",
+                "",
+                "⚡ **Hyperparameter Optimization (HPO) — strongly recommended at plateau**:",
+                "The branch has stagnated. If the model architecture is sound, HPO is the most reliable way to break through.",
+                "Use Optuna with 30–50 trials to search the most impactful hyperparameters:",
+                "```python",
+                "import optuna",
+                "optuna.logging.set_verbosity(optuna.logging.WARNING)",
+                "def objective(trial):",
+                "    params = {",
+                "        'n_estimators': trial.suggest_int('n_estimators', 200, 2000),",
+                "        'max_depth': trial.suggest_int('max_depth', 3, 12),",
+                "        'learning_rate': trial.suggest_float('learning_rate', 0.005, 0.3, log=True),",
+                "        'subsample': trial.suggest_float('subsample', 0.5, 1.0),",
+                "        'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1.0),",
+                "    }",
+                "    model = XGBClassifier(**params, verbosity=0)",
+                "    model.fit(X_train, y_train, eval_set=[(X_val, y_val)], early_stopping_rounds=30)",
+                "    return metric_fn(y_val, model.predict_proba(X_val))",
+                "study = optuna.create_study(direction='maximize')",
+                "study.optimize(objective, n_trials=40, timeout=600)",
+                "best_params = study.best_params",
+                "```",
+                "Adapt the parameter space to the actual model being used.",
             ],
         }
     else:
@@ -291,6 +321,71 @@ def run(agent, parent_node: SearchNode) -> SearchNode:
 
     logger.info(f"[improve] {parent_node.id} → node {new_node.id}")
     return new_node
+
+
+# ============ Competition-type technique hints ============
+
+_COMPETITION_TYPE_HINTS = {
+    "Tabular": [
+        "**Tabular-specific techniques to consider**:",
+        "• Feature engineering: interaction terms, ratio features, target encoding, cyclic encodings for time/date",
+        "• GBDT ensembles: XGBoost + LightGBM + CatBoost blend (average probabilities or rank-average)",
+        "• Optuna HPO: tune n_estimators, learning_rate, max_depth, colsample_bytree, subsample",
+        "• Pseudo-labeling: train on labeled data → predict test → add high-confidence test rows to training",
+        "• Stacking: use OOF predictions from multiple base models as meta-features for a linear model",
+        "• Missing value strategies: median/mean imputation + missingness indicator flag as feature",
+    ],
+    "NLP": [
+        "**NLP-specific techniques to consider**:",
+        "• Try different pretrained transformers (deberta-v3-base, roberta-base, electra-base)",
+        "• Text augmentation: back-translation, synonym substitution, random deletion",
+        "• Pooling strategies: [CLS] token vs mean pooling vs max pooling vs concatenation",
+        "• Multi-task learning: add auxiliary objectives (e.g., NER alongside classification)",
+        "• Ensemble: average logits from multiple checkpoints (epoch ensemble) or multiple seeds",
+        "• Longer max_length: try 256 → 512 if memory allows",
+        "• Domain-adaptive pretraining: fine-tune LM on task corpus before classification head",
+    ],
+    "General Image": [
+        "**Image-specific techniques to consider**:",
+        "• Augmentation: MixUp, CutMix, RandAugment, GridDistortion, CoarseDropout",
+        "• Test-time augmentation (TTA): average predictions over horizontal flip + rotation variants",
+        "• Progressive resizing: train at 224 → fine-tune at 384 for better accuracy",
+        "• Label smoothing (0.1) to reduce overconfidence",
+        "• Cosine annealing with warm restarts for better convergence",
+        "• Backbone upgrade: EfficientNet-B4 → B7 or ViT-Base → ViT-Large if budget allows",
+        "• Pseudo-labeling on unlabeled test images if dataset is semi-supervised",
+    ],
+    "Medical Image": [
+        "**Medical imaging techniques to consider**:",
+        "• Intensity normalization per-scan (z-score or window/level clipping)",
+        "• 3D context: use neighboring slices as extra channels (2.5D approach)",
+        "• Class imbalance: weighted loss, oversampling positive cases, focal loss",
+        "• TTA: horizontal flip + slight rotation averaging",
+        "• Ensemble: multiple folds + multiple backbones (EfficientNet + DenseNet)",
+        "• Transfer from ImageNet then fine-tune — do NOT train from scratch",
+        "• Careful stratification: ensure each fold preserves patient-level grouping",
+    ],
+    "Audio": [
+        "**Audio-specific techniques to consider**:",
+        "• Features: log mel-spectrogram, MFCC, chroma, spectral contrast",
+        "• CNN on spectrograms: treat as image classification (EfficientNet/ResNet)",
+        "• wav2vec2 or HuBERT features as frozen encoder + classifier head",
+        "• Time/frequency masking augmentation (SpecAugment)",
+        "• Mixup on mel-spectrograms",
+        "• Multi-scale feature extraction: combine multiple window sizes",
+    ],
+}
+
+def _get_competition_type_hints(category: str) -> list:
+    """Return competition-type-specific technique suggestions for the improve prompt."""
+    # Normalize category to known keys
+    for key in _COMPETITION_TYPE_HINTS:
+        if key.lower() in category.lower() or category.lower() in key.lower():
+            return _COMPETITION_TYPE_HINTS[key]
+    # Fallback: tabular hints are broadly applicable
+    if any(kw in category.lower() for kw in ["tabular", "structured", "csv", "regression", "classification"]):
+        return _COMPETITION_TYPE_HINTS["Tabular"]
+    return []
 
 
 # ============ Diff improve pipeline ============

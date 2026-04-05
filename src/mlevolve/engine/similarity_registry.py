@@ -189,7 +189,7 @@ class SimilarityRegistry:
     @staticmethod
     def jaccard_similarity(a: frozenset[str], b: frozenset[str]) -> float:
         if not a and not b:
-            return 1.0
+            return 0.0  # both unknown → not near-duplicates
         if not a or not b:
             return 0.0
         return len(a & b) / len(a | b)
@@ -206,6 +206,15 @@ class SimilarityRegistry:
         with self._lock:
             self._fingerprints[node_id] = fp
             self._node_branch[node_id] = branch_id
+
+            # Remove from old class if this is a re-registration (e.g. code_summary update).
+            old_class_id = self._node_class.get(node_id)
+            if old_class_id is not None:
+                self._classes[old_class_id].discard(node_id)
+                # Clean up empty classes to avoid stale fingerprints attracting new nodes.
+                if not self._classes[old_class_id]:
+                    del self._classes[old_class_id]
+                    del self._class_fingerprint[old_class_id]
 
             # Find best matching existing class.
             best_class_id = None
@@ -260,7 +269,7 @@ class SimilarityRegistry:
             class_id = self._node_class.get(node_id)
             if class_id is None:
                 return 0, 0.0
-            node_ids = self._classes[class_id]
+            node_ids = set(self._classes[class_id])  # copy to avoid concurrent modification
 
         id2node = {n.id: n for n in journal.nodes}
         total_visits = 0
@@ -271,6 +280,35 @@ class SimilarityRegistry:
                 total_visits += node.visits
                 total_reward += node.total_reward
         return total_visits, total_reward
+
+    def get_weighted_penalty_targets(self, node_id: str, journal) -> list[tuple]:
+        """Returns [(eq_node, similarity)] for cross-branch penalty sharing.
+
+        Thread-safe: all dict access is inside the lock.
+        Only returns nodes from different branches.
+        """
+        with self._lock:
+            class_id = self._node_class.get(node_id)
+            if class_id is None:
+                return []
+            node_fp = self._fingerprints.get(node_id, frozenset())
+            node_branch = self._node_branch.get(node_id)
+            targets = []
+            for eq_id in self._classes[class_id]:
+                if eq_id == node_id:
+                    continue
+                eq_branch = self._node_branch.get(eq_id)
+                if eq_branch != node_branch:
+                    eq_fp = self._fingerprints.get(eq_id, frozenset())
+                    sim = self.jaccard_similarity(node_fp, eq_fp)
+                    targets.append((eq_id, sim))
+
+        id2node = {n.id: n for n in journal.nodes}
+        return [
+            (id2node[eq_id], sim)
+            for eq_id, sim in targets
+            if eq_id in id2node
+        ]
 
     def get_novelty_score(self, code: str, code_summary: Optional[str] = None) -> float:
         """0.0 = exact match to a large class, 1.0 = totally novel approach."""

@@ -1,6 +1,7 @@
 """Node evaluation: backpropagate, check_improvement, get_node_reward."""
 
 import logging
+import math
 import time
 import random
 
@@ -36,56 +37,130 @@ def _propagate_reward_up(node: SearchNode, value: float):
 
 
 def graph_backpropagate(agent, node: SearchNode, value: float, add_to_tree=True):
-    """GBOP-inspired backpropagation: tree backprop + cross-branch reward sharing.
+    """GBOP-inspired backpropagation: tree backprop + asymmetric cross-branch penalty sharing.
 
-    Per Leurent & Maillard (2020), nodes representing the same state should share
-    value estimates. After normal tree backpropagation, we inject the full reward
-    into equivalent nodes in other branches and propagate up their parent chains.
+    Improvement over vanilla GBOP: only share *negative* rewards cross-branch,
+    weighted by Jaccard similarity. This prevents reward contamination (a strong
+    node in branch A inflating a weak equivalent in branch B) while still teaching
+    branches to avoid approaches that failed elsewhere.
     """
     # Step 1: Normal tree backpropagation
     backpropagate(node, value, add_to_tree)
 
-    # Step 2: Share reward with equivalent nodes in other branches
-    if not hasattr(agent, 'similarity_registry'):
+    # Step 2: Asymmetric, similarity-weighted penalty sharing
+    # Positive rewards stay local — each branch earns its own wins.
+    # Penalties are shared so branches learn what doesn't work cross-branch.
+    if value >= 0 or not hasattr(agent, 'similarity_registry'):
         return
 
-    equivalent_ids = agent.similarity_registry.get_equivalence_class(node.id)
-    if len(equivalent_ids) <= 1:
+    targets = agent.similarity_registry.get_weighted_penalty_targets(node.id, agent.journal)
+    if not targets:
         return
 
-    id2node = {n.id: n for n in agent.journal.nodes}
-    for eq_id in equivalent_ids:
-        if eq_id == node.id:
-            continue
-        eq_node = id2node.get(eq_id)
-        if eq_node and eq_node.branch_id != node.branch_id:
-            logger.info(
-                f"[graph-backprop] {node.id[:8]} → {eq_id[:8]} "
-                f"(branch {node.branch_id}→{eq_node.branch_id}, reward={value})"
+    for eq_node, sim in targets:
+        weighted_penalty = value * sim  # negative * [0,1] → still negative, scaled by similarity
+        logger.info(
+            f"[graph-backprop] penalty {node.id[:8]} → {eq_node.id[:8]} "
+            f"(branch {node.branch_id}→{eq_node.branch_id}, "
+            f"sim={sim:.2f}, penalty={weighted_penalty:.3f})"
+        )
+        _propagate_reward_up(eq_node, weighted_penalty)
+
+
+def _update_beta(agent, node: SearchNode):
+    """Wire the dormant Bayesian fields: update Beta(alpha, beta) after evaluation.
+
+    success = metric improved vs parent (or first node in branch).
+    Also propagates the outcome to sufficiently similar nodes in other branches
+    so Thompson Sampling at the draft level benefits from cross-branch signal.
+    """
+    if node.is_buggy is True or node.is_buggy is None:
+        success = False
+    elif node.metric is None or node.metric.value is None:
+        success = False
+    else:
+        parent = node.parent
+        if (parent and parent.metric and parent.metric.value is not None
+                and not parent.is_buggy):
+            improvement = (
+                node.metric.value - parent.metric.value
+                if agent.metric_maximize
+                else parent.metric.value - node.metric.value
             )
-            _propagate_reward_up(eq_node, value)
+            success = improvement > agent.scfg.metric_improvement_threshold
+        else:
+            success = True  # first evaluated node in branch, treat as success
+
+    node.update_beta(success)
+    logger.debug(f"[beta] node {node.id[:8]} success={success} → α={node.alpha} β={node.beta}")
+
+    # Propagate outcome to similar nodes in other branches (threshold: sim >= 0.5)
+    if hasattr(agent, 'similarity_registry'):
+        for eq_node, sim in agent.similarity_registry.get_weighted_penalty_targets(
+            node.id, agent.journal
+        ):
+            if sim >= 0.5:
+                eq_node.update_beta(success)
+                logger.debug(
+                    f"[beta] cross-branch {node.id[:8]}→{eq_node.id[:8]} "
+                    f"success={success} sim={sim:.2f}"
+                )
 
 
 def get_node_reward(agent, node: SearchNode):
-    reward = 0
+    """Compute MCTS reward for a node.
 
+    Scale: [-1, 2.0]
+    ─────────────────────────────────────────────
+    Bug / no metric          → -1.0  (failure)
+    Clean run, no improvement→  1.0  (baseline success)
+    Debug success (was buggy)→ +0.3  (small bonus – debugging is less
+                                       valuable than a genuine improvement)
+    Beat global best         → +0.0 … +0.7 magnitude bonus
+                                (proportional to relative improvement,
+                                 saturates at ~20% relative gain → +0.7)
+    ─────────────────────────────────────────────
+    Motivation for changes vs. original {-1, +1, +1.5}:
+    • Old code gave debug-success the SAME reward (+1.5) as beating the
+      global best.  This over-rewards debugging and biases UCT toward
+      continuing broken branches rather than exploring new ones.
+    • Magnitude-aware bonus lets UCT distinguish a tiny improvement
+      (+0.001) from a large one (+10%), making backpropagation more
+      informative.
+    """
     if node.is_buggy is True or node.is_buggy is None:
-        reward = -1
-    elif node.is_buggy is False and node.metric.value is None:
-        reward = -1
-    else:
-        if node.metric.value is not None and agent.best_metric is not None:
-            improvement = node.metric.value - agent.best_metric if node.metric.maximize else agent.best_metric - node.metric.value
-            if improvement > 0:
-                logger.info(f"Node {node.id} is better than the best node {agent.best_node.id} now!")
-                reward += 1.5
+        return -1.0
+    if node.metric.value is None:
+        return -1.0
 
-        if node.parent and node.parent.stage != "root":
-            if node.parent.is_buggy is True:
-                reward += 1.5
-            else:
-                reward += 1
-    return reward
+    # Base reward for a clean, metric-producing run
+    reward = 1.0
+
+    # ── Global-improvement bonus (magnitude-aware) ──────────────────────
+    if node.metric.value is not None and agent.best_metric is not None:
+        improvement = (
+            node.metric.value - agent.best_metric
+            if node.metric.maximize
+            else agent.best_metric - node.metric.value
+        )
+        if improvement > 0:
+            logger.info(f"Node {node.id} is better than the best node {agent.best_node.id} now!")
+            # Relative improvement capped at 20% → full +0.7 bonus.
+            # Uses log1p so even tiny gains get a positive signal.
+            scale = max(abs(agent.best_metric), 1e-6)
+            relative = improvement / scale
+            magnitude_bonus = min(0.7, 0.7 * (1 - math.exp(-relative / 0.2)))
+            reward += magnitude_bonus
+
+    # ── Debug-success bonus (was buggy, now fixed) ───────────────────────
+    # Smaller than the improvement bonus: fixing a bug is necessary but
+    # much less valuable than actually beating the best metric.
+    if node.parent and node.parent.stage != "root":
+        if node.parent.is_buggy is True:
+            reward += 0.3
+        # (no additional bonus for non-buggy parent — base 1.0 covers it)
+
+    return min(reward, 2.0)  # hard cap to keep UCT numerics stable
 
 
 def check_improvement(agent, cur_node: SearchNode, parent_node: SearchNode):
@@ -167,6 +242,7 @@ def check_improvement(agent, cur_node: SearchNode, parent_node: SearchNode):
                         cur_node.local_best_node = cur_node
                         logger.info(f"  └─ Set as local_best: {cur_node.metric.value:.4f}")
 
+                _update_beta(agent, cur_node)
                 reward = get_node_reward(agent, cur_node)
                 graph_backpropagate(agent, cur_node, reward)
                 return True
@@ -224,6 +300,7 @@ def check_improvement(agent, cur_node: SearchNode, parent_node: SearchNode):
             if cur_node.debug_depth >= agent.scfg.max_debug_depth:
                 cur_node.is_terminal = True
 
+    _update_beta(agent, cur_node)
     if should_backpropagate:
         reward = get_node_reward(agent, cur_node)
         graph_backpropagate(agent, cur_node, reward)

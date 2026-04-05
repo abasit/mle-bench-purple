@@ -37,11 +37,31 @@ def should_trigger_branch_fusion(agent) -> bool:
 
 
 def is_branch_stagnant(agent, branch_id: int, threshold: int = 3) -> bool:
-    """True if branch has no improvement over branch best for the last threshold attempts."""
-    if branch_id not in agent.branch_successful_nodes:
-        return False
+    """True if branch is stuck and not making progress.
 
-    successful_nodes = agent.branch_successful_nodes[branch_id]
+    Two stagnation modes are detected:
+
+    1. **Bug-loop**: the branch has produced ≥ (threshold) nodes in
+       ``branch_all_nodes`` but still has zero successful nodes.  The
+       original code only looked at ``branch_successful_nodes``, so a
+       branch that kept producing bugs was never detected as stagnant
+       and kept getting infinite debug attempts.
+
+    2. **Metric-plateau**: the last ``threshold`` successful nodes all
+       failed to beat the branch best metric (original logic, kept).
+    """
+    # ── Mode 1: bug-loop detection ──────────────────────────────────────
+    all_nodes = agent.branch_all_nodes.get(branch_id, [])
+    successful_nodes = agent.branch_successful_nodes.get(branch_id, [])
+
+    if len(all_nodes) >= threshold and len(successful_nodes) == 0:
+        logger.info(
+            f"Branch {branch_id} stagnant (bug-loop): "
+            f"{len(all_nodes)} total nodes, 0 successful"
+        )
+        return True
+
+    # ── Mode 2: metric-plateau ──────────────────────────────────────────
     if len(successful_nodes) < 1:
         return False
 
@@ -58,12 +78,14 @@ def is_branch_stagnant(agent, branch_id: int, threshold: int = 3) -> bool:
     if branch_best_metric is None:
         return False
 
-    consecutive_no_improvement = 0
     max_consecutive = threshold
+    recent_nodes = (
+        successful_nodes[-max_consecutive:]
+        if len(successful_nodes) >= max_consecutive
+        else successful_nodes
+    )
 
-    recent_nodes = successful_nodes[-max_consecutive:] if len(
-        successful_nodes) >= max_consecutive else successful_nodes
-
+    consecutive_no_improvement = 0
     for node in recent_nodes:
         if node.metric and node.metric.value is not None:
             if maximize:
@@ -76,8 +98,10 @@ def is_branch_stagnant(agent, branch_id: int, threshold: int = 3) -> bool:
 
     if consecutive_no_improvement >= len(recent_nodes) and len(recent_nodes) >= 2:
         logger.info(
-            f"Branch {branch_id} stagnant: {consecutive_no_improvement} consecutive attempts "
-            f"didn't exceed branch best {branch_best_metric}")
+            f"Branch {branch_id} stagnant (plateau): "
+            f"{consecutive_no_improvement} consecutive attempts "
+            f"didn't exceed branch best {branch_best_metric}"
+        )
         return True
 
     return False

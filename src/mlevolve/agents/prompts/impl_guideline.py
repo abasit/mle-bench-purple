@@ -61,14 +61,21 @@ def get_impl_guideline(
         f"📦 **Packages & Internet**: numpy, pandas, sklearn, torch, transformers, timm, xgboost, lightgbm (all pre-installed). torch.hub.load(), HuggingFace, etc. available during development."
         + (f" Offline models at `{pretrain_model_dir}`" if pretrain_model_dir else ""),
         "",
-        "⚠️ **API Compatibility**:",
-        "• LightGBM early stopping: Use `callbacks=[lgb.early_stopping(10)]` in fit(). NEVER pass early_stopping_rounds to fit().",
-        "• LightGBM verbose: Set `verbosity=-1` in the constructor. NEVER pass verbose to fit().",
-        "• XGBoost early stopping: Set `early_stopping_rounds=10` in the constructor. NEVER pass it to fit().",
-        "• XGBoost categorical: When features are pd.Categorical dtype, MUST pass `enable_categorical=True` to the constructor.",
-        "• Pandas: Use `df['col'] = df['col'].fillna(x)`. NEVER use `inplace=True` (broken in pandas 2.0+).",
-        "• AdamW: Use `from torch.optim import AdamW`. NEVER use `from transformers import AdamW`.",
-        "• After fillna(), verify: `assert not df['col'].isna().any()` before calling .str/.apply on that column.",
+        "🔴 **CRITICAL API Rules — violations cause immediate crash**:",
+        "• LightGBM: `LGBMClassifier(verbosity=-1)` in constructor. `fit(X_train, y_train, eval_set=[(X_val, y_val)], callbacks=[lgb.early_stopping(10), lgb.log_evaluation(0)])`. NEVER pass `early_stopping_rounds` or `verbose` to fit().",
+        "• XGBoost with early stopping: `XGBClassifier(verbosity=0)` in constructor. Pass `early_stopping_rounds=10` and `eval_set=[(X_val, y_val)]` to fit(). When retraining on full data (no val set), do NOT pass early_stopping_rounds at all — omit it or set `best_iteration` manually.",
+        "• CatBoost: `CatBoostClassifier(early_stopping_rounds=50, verbose=0)` in constructor. Pass `eval_set=(X_val, y_val)` to fit(). NEVER pass `early_stopping_rounds` or `verbose` to fit().",
+        "• CatBoost categoricals: Pass `cat_features=cat_cols` to constructor. Do NOT label-encode before CatBoost.",
+        "• XGBoost categoricals: Pass `enable_categorical=True` to constructor when using pd.Categorical features.",
+        "• Pandas: `df['col'] = df['col'].fillna(x)` — NEVER `inplace=True` (broken in pandas 2.0+).",
+        "• AdamW: `from torch.optim import AdamW` — NEVER `from transformers import AdamW`.",
+        "• numpy/torch dtype: Ensure all features are numeric (float32/float64) before model.fit(). Cast with `.astype(float)` if needed.",
+        "• After fillna(): verify `assert not df['col'].isna().any()` before calling .str/.apply on that column.",
+        "• Val/test consistency: define a single `preprocess(df)` function called identically for both val and test — NEVER inline separate preprocessing blocks.",
+        "• KeyError guard: NEVER access `test_df['target']` or any label column on test set — test CSVs have no target column.",
+        "• IndexError guard: always check `len(X_train) > 0` and `len(X_val) > 0` before model.fit(); check `len(classes_) > 1` before using class indices.",
+        "• TypeError guard: never pass `None` to sklearn metrics; always verify `y_pred is not None` and `len(y_pred) == len(y_val)` before scoring.",
+        "• Column name safety: after any merge/join, verify expected columns exist with `assert 'col' in df.columns, f'Missing col, got {df.columns.tolist()}'`.",
         "",
         "🚫 **Execution Guidelines**:",
         "• NO tqdm (not installed), NO verbose=1",
@@ -80,6 +87,17 @@ def get_impl_guideline(
         "• Did I generate submission.csv in correct path with ALL test predictions?",
         "• Did I print validation metric as the last line?",
         "• Did I use the COMPLETE training dataset (not a tiny subset)?",
+        "• Did val and test inference use IDENTICAL preprocessing and postprocessing logic?",
+        "",
+        "💾 **OOF Predictions (for ensemble / stacking)**:",
+        "• After k-fold training, save out-of-fold predictions: `np.save('./working/oof_preds.npy', oof_predictions)`",
+        "• These enable downstream blending without re-running the model.",
+        "",
+        "🔧 **Post-Processing (squeeze extra performance)**:",
+        "• Binary classification: optimize decision threshold on validation set (`threshold = np.percentile(val_probs, 100*(1-positive_rate))`)",
+        "• Multiclass probabilities: apply temperature scaling if val ECE is high (`probs = softmax(logits / T)`)",
+        "• Regression: clip predictions to observed training target range to prevent out-of-distribution outputs",
+        "• Rank normalization before blending: `scipy.stats.rankdata(preds) / len(preds)`",
     ]
     if expose_prediction:
         impl_guideline.append(
@@ -90,7 +108,12 @@ def get_impl_guideline(
 
     if k_fold_validation > 1:
         impl_guideline.append(
-            f"The evaluation should be based on {k_fold_validation}-fold cross-validation but only if that's an appropriate evaluation for the task at hand."
+            f"**Cross-Validation ({k_fold_validation}-fold StratifiedKFold required)**:\n"
+            f"• Use StratifiedKFold(n_splits={k_fold_validation}, shuffle=True, random_state=42) for classification, KFold for regression.\n"
+            f"• Train on each fold's train split, evaluate on its val split. Report mean CV score as the Final Validation Score.\n"
+            f"• CRITICAL: Any group-level statistics (e.g. group mean of target, group size) MUST be computed inside each fold using only that fold's training rows. NEVER compute them on the full training set before splitting — this causes target leakage and inflated CV scores that do not generalize.\n"
+            f"• For test predictions: retrain on the full training set (or average out-of-fold predictions) and generate submission.csv.\n"
+            f"• Print: `print(f'Final Validation Score: {{mean_cv_score:.4f}} (std: {{std_cv_score:.4f}})')`"
         )
 
     return {"Implementation guideline": impl_guideline}

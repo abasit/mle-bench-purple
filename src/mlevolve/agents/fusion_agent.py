@@ -22,12 +22,22 @@ def _get_fusion_candidates(agent, parent_node: SearchNode) -> List[SearchNode]:
 
     for branch_id in agent.branch_successful_nodes.keys():
         if branch_id != parent_node.branch_id:
-            branch_candidates = solution_manager.get_branch_top_nodes(agent,branch_id, top_k=2)
+            branch_candidates = solution_manager.get_branch_top_nodes(agent, branch_id, top_k=3)
             candidates.extend(branch_candidates)
 
     if not candidates:
-        current_branch_candidates = solution_manager.get_branch_top_nodes(agent,parent_node.branch_id, top_k=2)
+        current_branch_candidates = solution_manager.get_branch_top_nodes(agent, parent_node.branch_id, top_k=3)
         candidates = [node for node in current_branch_candidates if node.id != parent_node.id]
+
+    # Globally sort and return top 3 best candidates
+    maximize = agent.metric_maximize if agent.metric_maximize is not None else True
+    candidates.sort(
+        key=lambda n: n.metric.value if (n.metric and n.metric.value is not None) else (
+            float('-inf') if maximize else float('inf')
+        ),
+        reverse=maximize,
+    )
+    candidates = candidates[:3]
 
     logger.info(f"Found {len(candidates)} fusion candidates for node {parent_node.id}")
     return candidates

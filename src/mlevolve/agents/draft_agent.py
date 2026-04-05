@@ -108,7 +108,7 @@ def run(agent, init_solution_path: Optional[str] = None) -> SearchNode:
 
     prompt["Instructions"] |= {
         "Solution sketch guideline": [
-            "- This first solution design should be relatively simple — avoid complex ensemble strategies or extensive hyperparameter searches at this stage.\n",
+            "- Design a **competitive, complete solution** — not a baseline. Include proper feature engineering, a well-configured model with sensible defaults (e.g., 500 estimators, appropriate depth), and correct validation. Avoid complex multi-model ensembles at this stage, but the single model must be production-quality.\n",
             "- 🎯 **CRITICAL: NOVELTY & DIVERSITY REQUIREMENT**:\n",
             "  • **Mandatory**: Your solution MUST be NOVEL compared to ALL existing attempts in Memory.\n",
             "  • **Step 1**: Carefully analyze the core idea of EACH previous attempt in Memory.\n",
@@ -120,7 +120,7 @@ def run(agent, init_solution_path: Optional[str] = None) -> SearchNode:
             "- Don't propose the same modelling solution but keep the evaluation the same.\n",
             "- Your plan should be concise but comprehensive: Must address WHAT/WHY/HOW (2-4 sentences each). Avoid verbosity - every sentence should add new insight. Natural length: around 8-12 sentences for a complete reasoning process.\n",
             "- Propose an evaluation metric that is reasonable for this task.\n",
-            "- Don't suggest to do EDA.\n",
+            "- Lightweight data inspection is allowed and encouraged: check `df.shape`, `df.dtypes`, `df.isnull().sum()`, `df[target].value_counts()` — but keep it under 5 lines total. Do NOT produce plots, extensive statistics, or multi-step EDA notebooks.\n",
             "- The data is already prepared in `./input` directory. No need to unzip files.\n",
         ],
         "Coding & Execution Guidelines (CRITICAL)": [

@@ -128,7 +128,7 @@ def submission_format_fix_prompt(
 def validate_submission_content_quality(
     submission_path: Path,
     sample_path: Path | None = None,
-    constant_threshold: float = 0.95,
+    constant_threshold: float = 0.99,
 ) -> tuple[bool, str]:
     """Local check for submission content quality (placeholder/constant filling). Returns (is_valid, error_message)."""
     import numpy as np

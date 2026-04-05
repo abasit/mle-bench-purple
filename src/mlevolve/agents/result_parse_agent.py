@@ -166,14 +166,40 @@ def _build_introduction(agent) -> str:
 def _check_submission_file(agent, node: SearchNode) -> bool:
     correct_path = agent.cfg.workspace_dir / "submission" / f"submission_{node.id}.csv"
 
-    if not correct_path.exists():
-        wrong_path = agent.cfg.workspace_dir / f"submission_{node.id}.csv"
-        if wrong_path.exists():
-            correct_path.parent.mkdir(parents=True, exist_ok=True)
-            wrong_path.rename(correct_path)
-            logger.warning(f" {wrong_path} are moved to {correct_path}")
+    if correct_path.exists():
+        return True
 
-    return correct_path.exists()
+    # Check the one common wrong location first (root of workspace)
+    wrong_path = agent.cfg.workspace_dir / f"submission_{node.id}.csv"
+    if wrong_path.exists():
+        correct_path.parent.mkdir(parents=True, exist_ok=True)
+        wrong_path.rename(correct_path)
+        logger.warning(f"Moved submission from {wrong_path} to {correct_path}")
+        return True
+
+    # Broader fallback: scan workspace for any CSV with 'submission' in its name.
+    # The LLM may have used a dynamic path (os.path.join, f-string, Path object) that
+    # isolate_submission_path couldn't rewrite at code-generation time.
+    workspace_dir = agent.cfg.workspace_dir
+    candidates = sorted(workspace_dir.rglob("*submission*.csv"))
+    # Exclude already-tagged files belonging to other nodes
+    node_id_short = str(node.id)
+    for candidate in candidates:
+        # Skip files belonging to other nodes (they contain a different id)
+        if f"submission_" in candidate.name and node_id_short not in candidate.name:
+            continue
+        # Skip the best_submission dir (those are copies from previous best)
+        if "best_submission" in str(candidate) or "top_solution" in str(candidate):
+            continue
+        try:
+            correct_path.parent.mkdir(parents=True, exist_ok=True)
+            candidate.rename(correct_path)
+            logger.warning(f"[submission-search] Found submission at {candidate}, moved to {correct_path}")
+            return True
+        except Exception as e:
+            logger.warning(f"[submission-search] Could not move {candidate}: {e}")
+
+    return False
 
 
 def _save_code_summary(agent, node: SearchNode, response: dict):
@@ -228,7 +254,7 @@ def _validate_format_with_retry(agent, node: SearchNode):
         content_valid, content_error = validate_submission_content_quality(
                 submission_path=submission_path,
                 sample_path=None,
-                constant_threshold=0.95,
+                constant_threshold=0.99,
             )
 
         if not content_valid:
@@ -261,7 +287,7 @@ def _check_content_quality(agent, node: SearchNode, submission_path):
     content_valid, content_error = validate_submission_content_quality(
             submission_path=submission_path,
             sample_path=None,
-            constant_threshold=0.95,
+            constant_threshold=0.99,
         )
 
     if not content_valid:
@@ -293,26 +319,29 @@ def _mark_content_quality_failure(node: SearchNode, content_error):
 def _validate_metric_direction(agent, node: SearchNode, response: dict):
     returned_maximize = not response["lower_is_better"]
     if agent.metric_maximize is not None and returned_maximize != agent.metric_maximize:
-        logger.error("=" * 80)
-        logger.error(f"METRIC DIRECTION MISMATCH for Node {node.id}!")
-        logger.error(f"  - Returned lower_is_better = {response['lower_is_better']} (maximize={returned_maximize})")
-        logger.error(f"  - Pre-determined maximize = {agent.metric_maximize}")
-        logger.error(f"  - Marking this node as BUGGY, will NOT update top candidates")
-        logger.error("=" * 80)
-        node.is_buggy = True
-        node.metric = WorstMetricValue()
+        # The feedback LLM disagreed with the pre-determined metric direction.
+        # This commonly happens when code prints both a loss and an accuracy, and
+        # the feedback model picks the wrong one. Since the node ran correctly and
+        # produced a valid submission, we trust the pre-determined direction and
+        # keep the node alive — but log a prominent warning.
+        logger.warning("=" * 80)
+        logger.warning(f"METRIC DIRECTION MISMATCH for Node {node.id} — using pre-determined direction")
+        logger.warning(f"  - Feedback returned lower_is_better={response['lower_is_better']} (maximize={returned_maximize})")
+        logger.warning(f"  - Pre-determined maximize={agent.metric_maximize} (trusted)")
+        logger.warning(f"  - Node kept alive; metric value accepted under pre-determined direction")
+        logger.warning("=" * 80)
         node.analysis = (
-            f"{node.analysis}\n\n[ERROR] Metric direction mismatch detected:\n"
-            f"- Returned lower_is_better={response['lower_is_better']} (maximize={returned_maximize})\n"
-            f"- Expected maximize={agent.metric_maximize}\n"
-            f"- Pre-determination reasoning: {agent.metric_maximize_reasoning or 'N/A'}\n"
-            f"This node is marked as buggy and will not be considered for best/top candidates."
+            f"{node.analysis}\n\n[WARNING] Metric direction disagreement: "
+            f"feedback said maximize={returned_maximize}, pre-determination says maximize={agent.metric_maximize}. "
+            f"Pre-determined direction is trusted."
         )
     else:
         logger.info(f"Node {node.id} metric direction validated: maximize={agent.metric_maximize}")
-        node.metric = MetricValue(
-            response["metric"], maximize=agent.metric_maximize
-        )
+
+    # Always assign metric using the pre-determined direction
+    node.metric = MetricValue(
+        response["metric"], maximize=agent.metric_maximize
+    )
 
 
 def _check_data_leakage(agent, node: SearchNode, response: dict):
