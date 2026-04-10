@@ -43,12 +43,13 @@ class ExecConfig:
 
 @dataclass
 class SearchConfig:
-    num_drafts: int = 3                  # initial parallel drafts (variants 0..N-1)
+    num_drafts: int = 2                  # initial parallel drafts (variants 0..N-1)
     max_steps: int = 60                  # total node generations across the run
-    max_parallel: int = 3                # worker pool size for phase 2
+    max_parallel: int = 2                # worker pool size for phase 2
     max_debug_attempts_per_node: int = 2 # per-node cap (lineage cap also applies)
-    improve_top_k: int = 3               # rotate improves over top-K validated nodes
-    ensemble_top_k: int = 3              # blend top-K validated submissions at the end
+    improve_top_k: int = 2               # rotate improves over top-K validated nodes
+    final_candidate_top_k: int = 2       # keep top-K single-model submissions at the end
+    inline_repair_attempts: int = 1      # bounded generate-run-fix loop before marking a node buggy
     grace_seconds: float = 180           # don't spawn new steps under this remaining
     # Relative gap threshold for the val/holdout honesty check.
     # gap = |val - holdout| / max(|val|, |holdout|, 0.01)
@@ -96,7 +97,7 @@ class SolverConfig:
             agent.code.{model, base_url, api_key, temp, max_tokens, timeout, max_retries}
             agent.feedback.{...}             # secondary LLM block, fills gaps in code.*
             agent.llm.{...}                  # alternative single LLM block
-            agent.search.{num_drafts, max_steps, ...}
+            agent.search.{num_drafts, max_steps, final_candidate_top_k, ...}
             search.{...}                     # alternative top-level search block
             llm.{...}                        # alternative top-level llm block
             exec.timeout
@@ -182,7 +183,8 @@ class SolverConfig:
             "max_parallel",
             "max_debug_attempts_per_node",
             "improve_top_k",
-            "ensemble_top_k",
+            "final_candidate_top_k",
+            "inline_repair_attempts",
             "grace_seconds",
             "holdout_gap_rel_threshold",
             "metric_improve_eps",
@@ -193,6 +195,8 @@ class SolverConfig:
             if key in block:
                 cur = getattr(self.search, key)
                 setattr(self.search, key, type(cur)(block[key]))
+        if "ensemble_top_k" in block and "final_candidate_top_k" not in block:
+            self.search.final_candidate_top_k = int(block["ensemble_top_k"])
         # Backwards-compat for the old absolute-gap key.
         if "holdout_gap_threshold" in block and "holdout_gap_rel_threshold" not in block:
             self.search.holdout_gap_rel_threshold = float(block["holdout_gap_threshold"])
@@ -231,8 +235,16 @@ class SolverConfig:
             errors.append(
                 f"search.max_steps ({self.search.max_steps}) < num_drafts ({self.search.num_drafts})"
             )
-        if self.search.ensemble_top_k < 1:
-            errors.append(f"search.ensemble_top_k must be >= 1 (got {self.search.ensemble_top_k})")
+        if self.search.final_candidate_top_k < 1:
+            errors.append(
+                "search.final_candidate_top_k must be >= 1 "
+                f"(got {self.search.final_candidate_top_k})"
+            )
+        if self.search.inline_repair_attempts < 0:
+            errors.append(
+                "search.inline_repair_attempts must be >= 0 "
+                f"(got {self.search.inline_repair_attempts})"
+            )
         if self.exec.timeout <= 0:
             errors.append(f"exec.timeout must be > 0 (got {self.exec.timeout})")
         return errors
@@ -242,5 +254,6 @@ class SolverConfig:
             f"SolverConfig(model={self.llm.model}, time_limit={self.time_limit:.0f}s, "
             f"num_drafts={self.search.num_drafts}, max_steps={self.search.max_steps}, "
             f"max_parallel={self.search.max_parallel}, "
-            f"ensemble_top_k={self.search.ensemble_top_k})"
+            f"final_candidate_top_k={self.search.final_candidate_top_k}, "
+            f"inline_repair_attempts={self.search.inline_repair_attempts})"
         )

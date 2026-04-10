@@ -3,6 +3,7 @@ import base64
 import io
 import logging
 import shutil
+import threading
 import tarfile
 from pathlib import Path, PurePosixPath
 from uuid import uuid4
@@ -11,7 +12,6 @@ from a2a.server.tasks import TaskUpdater
 from a2a.types import FilePart, FileWithBytes, Message, Part, TaskState, TextPart
 from a2a.utils import get_message_text, new_agent_text_message
 
-from messenger import Messenger
 from solver import run_competition_candidates
 from solver.utils import find_sample_submission
 
@@ -25,9 +25,55 @@ if not logger.handlers:
 _VALIDATION_TIMEOUT_SECONDS = 180.0
 
 
+class A2AProgressBridge:
+    """Thread-safe adapter from solver progress callbacks to TaskUpdater."""
+
+    def __init__(self, loop: asyncio.AbstractEventLoop, updater: TaskUpdater):
+        self._loop = loop
+        self._updater = updater
+        self._lock = threading.Lock()
+        self._last_status: str | None = None
+        self._last_best: tuple[str, float | None] | None = None
+
+    def on_phase(self, phase: str, message: str) -> None:
+        self._send(f"Solver phase [{phase}]: {message}")
+
+    def on_step(self, step: int, total: int, message: str) -> None:
+        self._send(f"Solver step {step}/{total}: {message}")
+
+    def on_best(self, node_id: str, val_score: float | None, message: str) -> None:
+        with self._lock:
+            best_key = (node_id, val_score)
+            if best_key == self._last_best:
+                return
+            self._last_best = best_key
+        score_text = f"{val_score:.5f}" if val_score is not None else "N/A"
+        self._send(f"New best candidate: {node_id} val={score_text} | {message}")
+
+    def _send(self, text: str) -> None:
+        with self._lock:
+            if text == self._last_status:
+                return
+            self._last_status = text
+        future = asyncio.run_coroutine_threadsafe(
+            self._updater.update_status(
+                state=TaskState.working,
+                message=new_agent_text_message(text),
+            ),
+            self._loop,
+        )
+        future.add_done_callback(self._log_future_error)
+
+    @staticmethod
+    def _log_future_error(future) -> None:
+        try:
+            future.result()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"Progress update failed: {exc}")
+
+
 class Agent:
     def __init__(self):
-        self.messenger = Messenger()
         self.work_dir: Path | None = None
         self._state_lock = asyncio.Lock()
         self._pending_validation: asyncio.Future[str] | None = None
@@ -78,9 +124,10 @@ class Agent:
 
         logger.info("Running solver...")
         loop = asyncio.get_running_loop()
+        progress = A2AProgressBridge(loop, updater)
         submission_candidates = await loop.run_in_executor(
             None,
-            lambda: run_competition_candidates(work_dir),
+            lambda: run_competition_candidates(work_dir, progress=progress),
         )
 
         if not submission_candidates:

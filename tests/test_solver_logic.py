@@ -1,5 +1,8 @@
 import sys
+import shutil
+from io import BytesIO
 from pathlib import Path
+from uuid import uuid4
 
 import pandas as pd
 
@@ -9,7 +12,7 @@ from solver.config import SolverConfig  # noqa: E402
 from solver.interpreter import ExecResult  # noqa: E402
 from solver.nodes import Journal, SearchNode  # noqa: E402
 from solver.parsing import ParsedScores  # noqa: E402
-from solver.runner import _detect_fake_success, _execute_node  # noqa: E402
+from solver.runner import _detect_fake_success, _execute_node, _phase_finalize_candidates  # noqa: E402
 from solver.strategies import build_branch_history, pick_required_strategy  # noqa: E402
 from solver.task_classify import TaskProfile  # noqa: E402
 
@@ -19,8 +22,73 @@ class DummyInterpreter:
         self.data_dir = data_dir
         self._result = result
 
-    def run(self, code: str, node_id: str) -> ExecResult:
+    def run(
+        self,
+        code: str,
+        node_id: str,
+        *,
+        parent_state_path: Path | None = None,
+        session_parent_node_id: str | None = None,
+    ) -> ExecResult:
         return self._result
+
+
+class CapturingInterpreter(DummyInterpreter):
+    def __init__(self, data_dir: Path, result: ExecResult):
+        super().__init__(data_dir, result)
+        self.calls: list[tuple[Path | None, str | None]] = []
+
+    def run(
+        self,
+        code: str,
+        node_id: str,
+        *,
+        parent_state_path: Path | None = None,
+        session_parent_node_id: str | None = None,
+    ) -> ExecResult:
+        self.calls.append((parent_state_path, session_parent_node_id))
+        return self._result
+
+
+class SequencedInterpreter:
+    def __init__(self, data_dir: Path, results: list[ExecResult]):
+        self.data_dir = data_dir
+        self._results = list(results)
+        self.calls: list[str] = []
+
+    def run(
+        self,
+        code: str,
+        node_id: str,
+        *,
+        parent_state_path: Path | None = None,
+        session_parent_node_id: str | None = None,
+    ) -> ExecResult:
+        self.calls.append(code)
+        if not self._results:
+            raise AssertionError("No more queued results")
+        return self._results.pop(0)
+
+
+class DummyLLM:
+    def __init__(self, repaired_code: str):
+        self.repaired_code = repaired_code
+        self.calls: list[list[dict[str, str]]] = []
+
+    def chat(self, messages, *, temperature=None, max_tokens=None, label="chat"):
+        self.calls.append(messages)
+        return f"```python\n{self.repaired_code}\n```\nSTRATEGIES: model:catboost"
+
+    def extract_python_code(self, text: str) -> str:
+        start = text.find("```python")
+        if start < 0:
+            return ""
+        start = text.find("\n", start) + 1
+        end = text.find("```", start)
+        return text[start:end].strip()
+
+    def extract_first_paragraph(self, text: str, max_chars: int = 600) -> str:
+        return "repair"
 
 
 def test_detect_fake_success_flags_sample_submission_clone(tmp_path: Path):
@@ -144,6 +212,170 @@ def test_pick_required_strategy_uses_timeseries_plan():
         metric_name="error_metric",
     )
     assert choice in {"cv:timeseries_split", "fe:lag_features", "fe:datetime_expansion", "fe:aggregation_groupby"}
+
+
+def test_pick_required_strategy_tabular_prefers_generic_single_model_moves():
+    choice = pick_required_strategy(
+        fraction_used=0.1,
+        used=set(),
+        task_type="tabular",
+        objective="binary_classification",
+        metric_name="logloss",
+    )
+    assert choice is not None
+    assert not choice.startswith("ensemble:")
+    assert choice in {
+        "model:catboost",
+        "fe:missing_indicators",
+        "fe:frequency_encoding",
+        "fe:id_parsing",
+        "fe:group_size",
+        "fe:delimited_split",
+        "fe:datetime_expansion",
+        "fe:boolean_cleanup",
+    }
+    assert choice not in {
+        "fe:label_encoding",
+        "fe:one_hot",
+        "fe:target_encoding_oof",
+    }
+
+
+def test_pick_required_strategy_tabular_mid_phase_avoids_brittle_numeric_model_swaps():
+    choice = pick_required_strategy(
+        fraction_used=0.45,
+        used={
+            "model:catboost",
+            "fe:missing_indicators",
+            "fe:frequency_encoding",
+            "fe:id_parsing",
+            "fe:group_size",
+            "fe:delimited_split",
+            "fe:datetime_expansion",
+            "fe:boolean_cleanup",
+        },
+        task_type="tabular",
+        objective="binary_classification",
+        metric_name="logloss",
+    )
+    assert choice is not None
+    assert choice in {
+        "model:lightgbm",
+        "fe:aggregation_groupby",
+        "fe:row_stats",
+        "fe:ratio_diff",
+        "fe:numeric_binning",
+        "fe:interaction_features",
+    }
+    assert choice not in {"model:xgboost", "model:histgbm", "model:sklearn_extratrees", "fe:label_encoding", "fe:one_hot", "fe:target_encoding_oof"}
+
+
+def test_execute_node_does_not_restore_failed_parent_session_state(tmp_path: Path):
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    pd.DataFrame({"id": [1, 2], "target": [0.0, 0.0]}).to_csv(
+        data_dir / "sample_submission.csv", index=False
+    )
+
+    node_dir = tmp_path / "nodes" / "n006"
+    node_dir.mkdir(parents=True)
+    sub_path = node_dir / "submission.csv"
+    pd.DataFrame({"id": [1, 2], "target": [0.2, 0.8]}).to_csv(sub_path, index=False)
+
+    parent_state = tmp_path / "failed-parent-session.pkl"
+    parent_state.write_bytes(b"stale")
+
+    parent = SearchNode(id="d001", stage="draft", code="print('parent')")
+    parent.is_buggy = True
+    parent.result = ExecResult(
+        return_code=1,
+        stdout="",
+        stderr="boom",
+        duration_seconds=1.0,
+        session_state_path=parent_state,
+        error_summary="boom",
+    )
+
+    child = SearchNode(id="i002", stage="improve", code="print('child')", parent_id="d001")
+
+    result = ExecResult(
+        return_code=0,
+        stdout="FINAL VAL SCORE: 0.81\nFINAL HOLDOUT SCORE: 0.80\nMETRIC DIRECTION: maximize\n",
+        stderr="",
+        duration_seconds=1.0,
+        submission_path=sub_path,
+    )
+    interpreter = CapturingInterpreter(data_dir=data_dir, result=result)
+    journal = Journal()
+    journal.add(parent)
+
+    _execute_node(interpreter, journal, child, cfg=SolverConfig(), task_profile=TaskProfile(maximize=True))
+
+    assert interpreter.calls
+    parent_state_path, session_parent_node_id = interpreter.calls[0]
+    assert parent_state_path is None
+    assert session_parent_node_id is None
+
+
+def test_execute_node_inline_repair_recovers_failed_attempt_without_tmp_fixture():
+    repo_root = Path(__file__).resolve().parents[1]
+    scratch_root = repo_root / "codex-test-artifacts"
+    scratch_root.mkdir(exist_ok=True)
+    work_dir = scratch_root / f"inline-repair-{uuid4().hex[:8]}"
+    work_dir.mkdir()
+
+    try:
+        data_dir = work_dir / "data"
+        data_dir.mkdir()
+        pd.DataFrame({"id": [1, 2], "target": [0.0, 0.0]}).to_csv(
+            data_dir / "sample_submission.csv", index=False
+        )
+
+        sub_path = work_dir / "submission.csv"
+        pd.DataFrame({"id": [1, 2], "target": [0.2, 0.8]}).to_csv(sub_path, index=False)
+
+        failed = ExecResult(
+            return_code=1,
+            stdout="",
+            stderr="TypeError: bad dtype",
+            duration_seconds=1.0,
+            error_summary="TypeError: bad dtype",
+        )
+        succeeded = ExecResult(
+            return_code=0,
+            stdout="FINAL VAL SCORE: 0.81\nFINAL HOLDOUT SCORE: 0.80\nMETRIC DIRECTION: maximize\n",
+            stderr="",
+            duration_seconds=1.0,
+            submission_path=sub_path,
+        )
+
+        interpreter = SequencedInterpreter(data_dir=data_dir, results=[failed, succeeded])
+        llm = DummyLLM("print('repaired')")
+        journal = Journal()
+        node = SearchNode(id="d001", stage="draft", code="print('broken')")
+
+        cfg = SolverConfig()
+        cfg.search.inline_repair_attempts = 1
+
+        _execute_node(
+            interpreter,
+            journal,
+            node,
+            cfg=cfg,
+            llm=llm,
+            data_preview="train.csv columns: id,target,x1",
+            task_profile_summary="Task profile: binary classification",
+            env_summary="- Python: 3.11",
+            task_profile=TaskProfile(maximize=True),
+        )
+
+        assert len(interpreter.calls) == 2
+        assert len(llm.calls) == 1
+        assert node.is_valid
+        assert not node.is_buggy
+        assert node.code == "print('repaired')"
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
 
 
 def test_execute_node_flags_identical_scores_as_suspicious(tmp_path: Path):
@@ -404,3 +636,42 @@ def test_execute_node_flags_high_fold_variance(tmp_path: Path):
 
     assert node.is_suspicious
     assert any("CV fold scores are unstable" in reason for reason in node.suspicion_reasons)
+
+
+def test_phase_finalize_candidates_returns_ranked_single_model_submissions(tmp_path: Path):
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    pd.DataFrame({"id": [1, 2], "target": [0.0, 0.0]}).to_csv(
+        data_dir / "sample_submission.csv", index=False
+    )
+
+    cfg = SolverConfig()
+    cfg.search.final_candidate_top_k = 2
+    journal = Journal()
+
+    rows = [
+        ("n001", 0.91, [0.9, 0.8]),
+        ("n002", 0.88, [0.1, 0.2]),
+        ("n003", 0.70, [0.4, 0.6]),
+    ]
+    for node_id, score, preds in rows:
+        sub_path = tmp_path / f"{node_id}.csv"
+        pd.DataFrame({"id": [1, 2], "target": preds}).to_csv(sub_path, index=False)
+        node = SearchNode(id=node_id, stage="draft", code="print('ok')")
+        node.result = ExecResult(
+            return_code=0,
+            stdout="",
+            stderr="",
+            duration_seconds=1.0,
+            submission_path=sub_path,
+        )
+        node.scores = ParsedScores(val_score=score, holdout_score=score - 0.01, maximize=True)
+        journal.add(node)
+
+    candidates = _phase_finalize_candidates(cfg=cfg, journal=journal, data_dir=data_dir)
+
+    assert len(candidates) == 2
+    first = pd.read_csv(BytesIO(candidates[0]))
+    second = pd.read_csv(BytesIO(candidates[1]))
+    assert first["target"].tolist() == [0.9, 0.8]
+    assert second["target"].tolist() == [0.1, 0.2]

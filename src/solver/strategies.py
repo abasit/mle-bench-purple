@@ -41,6 +41,7 @@ STRATEGY_VOCAB: dict[str, str] = {
     "model:catboost":         "CatBoost gradient boosting (handles strings via cat_features)",
     "model:lightgbm":         "LightGBM gradient boosting (requires int-encoded categoricals)",
     "model:xgboost":          "XGBoost gradient boosting (requires one-hot or freq encoding)",
+    "model:histgbm":          "sklearn HistGradientBoostingClassifier/Regressor",
     "model:sklearn_gbm":      "sklearn GradientBoostingClassifier/Regressor",
     "model:sklearn_rf":       "sklearn RandomForest",
     "model:sklearn_extratrees": "sklearn ExtraTreesClassifier/Regressor",
@@ -66,6 +67,10 @@ STRATEGY_VOCAB: dict[str, str] = {
 
     # ── Feature engineering (tabular) ─────────────────────────────────
     "fe:datetime_expansion":  "Datetime → year/month/day/dayofweek/hour",
+    "fe:boolean_cleanup":     "Normalize booleans / yes-no / true-false style columns",
+    "fe:id_parsing":          "Parse identifier-like columns into group/member/subfields",
+    "fe:missing_indicators":  "Missing-value flags and null-count features",
+    "fe:group_size":          "Group-size / shared-entity count features",
     "fe:target_encoding_oof": "Out-of-fold target encoding for high-cardinality cats",
     "fe:frequency_encoding":  "Frequency / count encoding",
     "fe:one_hot":             "One-hot encoding (low-cardinality)",
@@ -76,6 +81,7 @@ STRATEGY_VOCAB: dict[str, str] = {
     "fe:aggregation_groupby": "GroupBy mean/sum/std features",
     "fe:polynomial":          "PolynomialFeatures",
     "fe:row_stats":           "Per-row statistics (sum, mean, nunique, etc.)",
+    "fe:ratio_diff":          "Ratios, differences, totals across related numeric columns",
     "fe:lag_features":        "Lag / rolling features (time series)",
 
     # ── Hyperparameter search ─────────────────────────────────────────
@@ -85,14 +91,6 @@ STRATEGY_VOCAB: dict[str, str] = {
     "hp:gridsearch":          "GridSearchCV",
     "hp:randomsearch":        "RandomizedSearchCV",
     "hp:bayesian":            "BayesianOptimization",
-
-    # ── Ensembling / stability ────────────────────────────────────────
-    "ensemble:none":          "Single model, single seed",
-    "ensemble:seed_averaging": "Average predictions across multiple seeds of the same model",
-    "ensemble:cv_fold_averaging": "Average per-fold test predictions (no full-train refit)",
-    "ensemble:in_script":     "Multiple model families inside one script",
-    "ensemble:stacking":      "Stacking with OOF predictions + meta-model",
-    "ensemble:rank_average":  "Rank-average across model probability columns",
 
     # ── Data tricks ───────────────────────────────────────────────────
     "pseudo_labeling":        "Pseudo-labeling on confident test predictions",
@@ -133,6 +131,7 @@ _INFER_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\bCatBoost(Classifier|Regressor)|catboost\.train\b"), "model:catboost"),
     (re.compile(r"\bimport lightgbm\b|\blgb\.(train|Dataset)\b|\bLGBM(Classifier|Regressor)\b"), "model:lightgbm"),
     (re.compile(r"\bimport xgboost\b|\bxgb\.(train|DMatrix)\b|\bXGB(Classifier|Regressor)\b"), "model:xgboost"),
+    (re.compile(r"\bHistGradientBoosting(Classifier|Regressor)\b"), "model:histgbm"),
     (re.compile(r"\bGradientBoosting(Classifier|Regressor)\b"), "model:sklearn_gbm"),
     (re.compile(r"\bRandomForest(Classifier|Regressor)\b"), "model:sklearn_rf"),
     (re.compile(r"\bExtraTrees(Classifier|Regressor)\b"), "model:sklearn_extratrees"),
@@ -162,6 +161,20 @@ _INFER_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 
     # Feature engineering
     (re.compile(r"target_encod|TargetEncoder|MeanEncoder"), "fe:target_encoding_oof"),
+    (re.compile(r"SimpleImputer\([^)]*add_indicator\s*=\s*True|isna\(|isnull\(|notna\(|notnull\("), "fe:missing_indicators"),
+    (
+        re.compile(
+            r"(?is)(?:"
+            r"(?:id|code|key|uuid|guid|account|customer|user|device|session|record|order|group)"
+            r".{0,160}(?:str\.split|str\.extract|str\.slice|str\[[^\]]+\])"
+            r"|(?:str\.split|str\.extract|str\.slice|str\[[^\]]+\]).{0,160}"
+            r"(?:id|code|key|uuid|guid|account|customer|user|device|session|record|order|group)"
+            r")"
+        ),
+        "fe:id_parsing",
+    ),
+    (re.compile(r"transform\(\s*['\"]size['\"]\s*\)|cumcount\(|group_size|family_size", re.IGNORECASE), "fe:group_size"),
+    (re.compile(r"bool|true|false|yes|no|cryosleep|vip", re.IGNORECASE), "fe:boolean_cleanup"),
     (re.compile(r"\.value_counts\(\).*\.to_dict\(\)|freq_encod|frequency_encod"), "fe:frequency_encoding"),
     (re.compile(r"\bOneHotEncoder\b|pd\.get_dummies\("), "fe:one_hot"),
     (re.compile(r"\bOrdinalEncoder\b|pd\.factorize\("), "fe:label_encoding"),
@@ -170,12 +183,18 @@ _INFER_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     (re.compile(r"\.dt\.(year|month|day|dayofweek|hour|minute|quarter|dayofyear)\b"), "fe:datetime_expansion"),
     (re.compile(r"\.groupby\([^)]+\)\.(agg|mean|sum|std|max|min|count)\("), "fe:aggregation_groupby"),
     (re.compile(r"\bKBinsDiscretizer|qcut\(|pd\.cut\("), "fe:numeric_binning"),
+    (
+        re.compile(
+            r"(?is)(?:"
+            r"_ratio|_diff|_delta|_total|_sum|row_total|row_sum"
+            r"|sum\(\s*axis\s*=\s*1\)|mean\(\s*axis\s*=\s*1\)|std\(\s*axis\s*=\s*1\)"
+            r"|\[[^\]]+\]\s*/\s*\([^)]+\)"
+            r"|\[[^\]]+\]\s*-\s*\[[^\]]+\]"
+            r")"
+        ),
+        "fe:ratio_diff",
+    ),
     (re.compile(r"\.shift\(\d+\)|rolling\("), "fe:lag_features"),
-
-    # Ensembling / stability
-    (re.compile(r"for.*seed.*in.*\[.*\d+.*,.*\d+"), "ensemble:seed_averaging"),
-    (re.compile(r"StackingClassifier|StackingRegressor|oof.*predict|out.of.fold"), "ensemble:stacking"),
-    (re.compile(r"\.rank\(.*pct=True"), "ensemble:rank_average"),
 
     # Data tricks
     (re.compile(r"pseudo[_-]?label"), "pseudo_labeling"),
@@ -354,21 +373,29 @@ def render_branch_history_table(rows: list[BranchHistoryRow]) -> str:
 # Per-task ranked menus. Higher-priority strategies appear earlier so the
 # required-strategy picker walks them in order.
 _TABULAR_MENU = [
+    "model:catboost",
+    "fe:missing_indicators",
+    "fe:frequency_encoding",
+    "fe:id_parsing",
+    "fe:group_size",
     "fe:delimited_split",
     "fe:datetime_expansion",
-    "fe:target_encoding_oof",
-    "fe:frequency_encoding",
-    "fe:interaction_features",
+    "model:lightgbm",
     "fe:aggregation_groupby",
     "fe:row_stats",
+    "fe:ratio_diff",
+    "fe:interaction_features",
     "fe:numeric_binning",
+    "hp:manual_tuning",
     "hp:optuna",
-    "ensemble:seed_averaging",
-    "ensemble:cv_fold_averaging",
-    "ensemble:in_script",
-    "ensemble:stacking",
     "calibration:isotonic",
+    "calibration:platt",
     "post:threshold_tuning",
+    "post:rank_clip",
+    "fe:boolean_cleanup",
+    "fe:label_encoding",
+    "fe:one_hot",
+    "fe:target_encoding_oof",
     "pseudo_labeling",
     "balancing:class_weights",
 ]
@@ -381,16 +408,15 @@ _VISION_MENU = [
     "scheduler:onecycle",
     "optimizer:sgd_nesterov",
     "optimizer:lion",
-    "ensemble:cv_fold_averaging",
-    "ensemble:seed_averaging",
+    "post:threshold_tuning",
     "pseudo_labeling",
 ]
 
 _NLP_MENU = [
     "scheduler:linear_warmup",
     "scheduler:cosine",
-    "ensemble:seed_averaging",
-    "ensemble:cv_fold_averaging",
+    "optimizer:adamw",
+    "calibration:platt",
     "post:threshold_tuning",
     "pseudo_labeling",
 ]
@@ -400,8 +426,8 @@ _AUDIO_MENU = [
     "tta:multi_view",
     "scheduler:cosine",
     "optimizer:adamw",
-    "ensemble:seed_averaging",
-    "ensemble:cv_fold_averaging",
+    "optimizer:rmsprop",
+    "post:threshold_tuning",
     "pseudo_labeling",
 ]
 
@@ -410,9 +436,10 @@ _TIMESERIES_MENU = [
     "fe:datetime_expansion",
     "fe:aggregation_groupby",
     "cv:timeseries_split",
+    "model:lightgbm",
+    "model:xgboost",
+    "hp:manual_tuning",
     "hp:optuna",
-    "ensemble:seed_averaging",
-    "ensemble:cv_fold_averaging",
 ]
 
 
@@ -442,12 +469,12 @@ def _menu_for(
             _append_unique(menu, "calibration:isotonic")
             _append_unique(menu, "calibration:platt")
         if metric_name in {"auc", "ranking_metric", "correlation", "map"}:
-            _append_unique(menu, "ensemble:rank_average")
+            _append_unique(menu, "post:rank_clip")
         if metric_name in {"accuracy", "f1", "classification_metric", "overlap_metric"}:
             _append_unique(menu, "post:threshold_tuning")
     if objective == "recommendation":
         _append_unique(menu, "fe:aggregation_groupby")
-        _append_unique(menu, "ensemble:rank_average")
+        _append_unique(menu, "post:rank_clip")
     if objective in {"multilabel_classification", "binary_classification"}:
         _append_unique(menu, "balancing:class_weights")
     return menu
@@ -474,9 +501,9 @@ def pick_required_strategy(
     """Choose ONE strategy the next improve must apply.
 
     Time-aware exploration phases:
-        Phase 1 (early,  fraction_used <= 0.30): broaden FE
-        Phase 2 (mid,    0.30 < fraction_used <= 0.55): hyperparameter search
-        Phase 3 (late,   0.55 < fraction_used <= 0.80): ensembling / pseudo-labeling
+        Phase 1 (early,  fraction_used <= 0.30): validation-safe preprocessing
+        Phase 2 (mid,    0.30 < fraction_used <= 0.55): broader FE and model-family swaps
+        Phase 3 (late,   0.55 < fraction_used <= 0.80): tuning / calibration / pseudo-labeling
         Phase 4 (final,  fraction_used > 0.80): only safe small wins
 
     Returns None if every relevant strategy has already been tried (let the
@@ -507,69 +534,76 @@ def pick_required_strategy(
             ]) or _first(untried)
         if fraction_used <= 0.55:
             return _first([
+                "model:lightgbm",
+                "model:xgboost",
                 "hp:optuna",
                 "fe:lag_features",
-                "ensemble:seed_averaging",
             ]) or _first(untried)
         if fraction_used <= 0.80:
             return _first([
-                "ensemble:cv_fold_averaging",
-                "ensemble:seed_averaging",
+                "hp:manual_tuning",
+                "fe:aggregation_groupby",
+                "hp:optuna",
             ]) or _first(untried)
-        return _first(["ensemble:cv_fold_averaging", "fe:lag_features"]) or _first(untried)
+        return _first(["hp:manual_tuning", "fe:lag_features"]) or _first(untried)
 
     if task_type == "audio":
         if fraction_used <= 0.30:
             return _first(["data_augmentation", "scheduler:cosine", "optimizer:adamw"]) or _first(untried)
         if fraction_used <= 0.55:
-            return _first(["tta:multi_view", "ensemble:seed_averaging"]) or _first(untried)
+            return _first(["tta:multi_view", "optimizer:rmsprop"]) or _first(untried)
         if fraction_used <= 0.80:
-            return _first(["ensemble:cv_fold_averaging", "pseudo_labeling"]) or _first(untried)
-        return _first(["ensemble:cv_fold_averaging", "tta:multi_view"]) or _first(untried)
+            return _first(["post:threshold_tuning", "pseudo_labeling"]) or _first(untried)
+        return _first(["post:threshold_tuning", "tta:multi_view"]) or _first(untried)
 
     # Tabular phase plan
     if task_type not in ("vision", "nlp"):
         if fraction_used <= 0.30:
-            # Broaden feature engineering first.
+            # Start with the safest schema-driven moves and the most robust model family.
             return _first([
+                "model:catboost",
+                "fe:missing_indicators",
+                "fe:frequency_encoding",
+                "fe:id_parsing",
+                "fe:group_size",
                 "fe:delimited_split",
                 "fe:datetime_expansion",
-                "fe:target_encoding_oof",
-                "fe:frequency_encoding",
-                "fe:interaction_features",
-                "fe:aggregation_groupby",
+                "fe:boolean_cleanup",
             ]) or _first(untried)
         if fraction_used <= 0.55:
-            # Hyperparameter search is the highest-leverage mid-phase move.
+            # Then broaden the numeric model family without forcing brittle encoders too early.
             return _first([
-                "hp:optuna",
+                "model:lightgbm",
+                "fe:aggregation_groupby",
                 "fe:row_stats",
+                "fe:ratio_diff",
                 "fe:numeric_binning",
+                "fe:interaction_features",
             ]) or _first(untried)
         if fraction_used <= 0.80:
-            # Ensembling and stability tricks.
+            # Leave the more brittle encoding-specific moves until later, after safer gains.
             late = [
-                "ensemble:seed_averaging",
-                "ensemble:cv_fold_averaging",
-                "ensemble:in_script",
-                "ensemble:stacking",
+                "hp:optuna",
+                "hp:manual_tuning",
+                "balancing:class_weights",
                 "pseudo_labeling",
             ]
             if metric_name == "logloss":
                 late.extend(["calibration:isotonic", "calibration:platt"])
             elif metric_name in {"auc", "ranking_metric", "correlation", "map"}:
-                late.append("ensemble:rank_average")
+                late.append("post:rank_clip")
             else:
                 late.append("post:threshold_tuning")
+            late.extend(["fe:boolean_cleanup", "fe:label_encoding", "fe:one_hot", "fe:target_encoding_oof"])
             return _first(late) or _first(untried)
         # Late stage — only safe small wins.
-        final_moves = ["ensemble:cv_fold_averaging"]
+        final_moves = ["hp:manual_tuning"]
         if metric_name == "logloss":
             final_moves.extend(["calibration:isotonic", "calibration:platt"])
         elif metric_name in {"accuracy", "f1", "classification_metric", "overlap_metric"}:
             final_moves.append("post:threshold_tuning")
         else:
-            final_moves.append("ensemble:seed_averaging")
+            final_moves.append("post:rank_clip")
         return _first(final_moves) or _first(untried)
 
     # Vision phase plan
@@ -579,20 +613,20 @@ def pick_required_strategy(
         if fraction_used <= 0.55:
             return _first(["scheduler:onecycle", "optimizer:sgd_nesterov", "tta:multi_view"]) or _first(untried)
         if fraction_used <= 0.80:
-            return _first(["ensemble:cv_fold_averaging", "ensemble:seed_averaging", "pseudo_labeling"]) or _first(untried)
-        return _first(["tta:hflip"])
+            return _first(["post:threshold_tuning", "pseudo_labeling", "tta:multi_view"]) or _first(untried)
+        return _first(["tta:hflip", "post:threshold_tuning"]) or _first(untried)
 
     # NLP phase plan
     if fraction_used <= 0.30:
-        return _first(["scheduler:linear_warmup", "scheduler:cosine"]) or _first(untried)
+        return _first(["scheduler:linear_warmup", "scheduler:cosine", "optimizer:adamw"]) or _first(untried)
     if fraction_used <= 0.55:
-        mid = ["ensemble:seed_averaging"]
+        mid = ["calibration:platt"]
         if objective not in {"qa", "span_extraction", "seq2seq"}:
             mid.append("post:threshold_tuning")
         return _first(mid) or _first(untried)
     if fraction_used <= 0.80:
-        return _first(["ensemble:cv_fold_averaging", "pseudo_labeling"]) or _first(untried)
-    late = ["ensemble:cv_fold_averaging"]
+        return _first(["pseudo_labeling", "calibration:platt"]) or _first(untried)
+    late = ["calibration:platt"]
     if objective not in {"qa", "span_extraction", "seq2seq"}:
         late.append("post:threshold_tuning")
     return _first(late) or _first(untried)

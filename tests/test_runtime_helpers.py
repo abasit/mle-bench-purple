@@ -127,7 +127,7 @@ def test_agent_requests_validation_and_reports_submission_artifact():
         )
 
         original = agent_module.run_competition_candidates
-        agent_module.run_competition_candidates = lambda work_dir: [b"id,target\n1,0.5\n"]
+        agent_module.run_competition_candidates = lambda work_dir, **kw: [b"id,target\n1,0.5\n"]
         try:
             should_complete = await agent.run(msg, updater)  # type: ignore[arg-type]
         finally:
@@ -217,7 +217,7 @@ def test_agent_tries_next_candidate_after_validation_rejection():
         )
 
         original = agent_module.run_competition_candidates
-        agent_module.run_competition_candidates = lambda work_dir: [
+        agent_module.run_competition_candidates = lambda work_dir, **kw: [
             b"id,target\n1,0.1\n",
             b"id,target\n1,0.9\n",
         ]

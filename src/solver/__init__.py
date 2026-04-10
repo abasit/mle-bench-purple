@@ -10,6 +10,12 @@ Public entry points:
     ``run_competition_candidates(work_dir) -> list[bytes]``
 """
 
+from .progress import LoggingProgress, ProgressCallback
 from .runner import run_competition, run_competition_candidates
 
-__all__ = ["run_competition", "run_competition_candidates"]
+__all__ = [
+    "run_competition",
+    "run_competition_candidates",
+    "ProgressCallback",
+    "LoggingProgress",
+]

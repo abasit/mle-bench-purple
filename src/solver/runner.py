@@ -5,8 +5,8 @@ Three phases:
     1. **Drafts** — generate N diverse drafts, execute them in parallel.
     2. **Search** — pipelined debug + improve over the validated nodes,
        running ``max_parallel`` worker threads.
-    3. **Finalize** — pick top-K by val score, blend with weighted rank
-       averaging, post-process columns, return bytes.
+    3. **Finalize** — pick top-K single-model candidates by val score,
+       post-process columns, return bytes.
 
 Cross-cutting features:
 
@@ -43,14 +43,17 @@ except Exception:
 
 from .config import SolverConfig
 from .data_preview import build_data_preview
-from .ensemble import blend_submissions
+from .explore import run_exploration
 from .interpreter import Interpreter
 from .llm import LLMClient
 from .nodes import Journal, SearchNode
 from .operators import make_debug, make_draft, make_improve
 from .parsing import holdout_gap_relative, parse_scores
 from .postprocess import patch_submission_columns
+from .progress import LoggingProgress, ProgressCallback
+from .prompts import build_repair_prompt
 from .selection import Selector
+from .strategies import collect_strategies
 from .task_classify import TaskProfile, load_kb_card, profile_task, render_task_profile
 from .utils import (
     TimeBudget,
@@ -72,13 +75,19 @@ _KB_DIR = Path(__file__).resolve().parent / "kb"
 # ── public entry point ────────────────────────────────────────────────────
 
 
-def run_competition(work_dir: Path) -> bytes | None:
+def run_competition(
+    work_dir: Path,
+    progress: ProgressCallback | None = None,
+) -> bytes | None:
     """Run the solver pipeline and return the primary submission candidate."""
-    candidates = run_competition_candidates(work_dir)
+    candidates = run_competition_candidates(work_dir, progress=progress)
     return candidates[0] if candidates else None
 
 
-def run_competition_candidates(work_dir: Path) -> list[bytes]:
+def run_competition_candidates(
+    work_dir: Path,
+    progress: ProgressCallback | None = None,
+) -> list[bytes]:
     """Run the solver pipeline and return ranked candidate submissions."""
     work_dir = Path(work_dir)
     data_dir = work_dir / "home" / "data"
@@ -90,6 +99,7 @@ def run_competition_candidates(work_dir: Path) -> list[bytes]:
 
     _seed_everything(cfg.seed)
     _configure_logging(cfg)
+    prog = progress or LoggingProgress()
 
     logger.info(f"[runner] starting solver: {cfg}")
     logger.info(f"[runner] data_dir={data_dir}")
@@ -154,7 +164,27 @@ def run_competition_candidates(work_dir: Path) -> list[bytes]:
     # Lock for selector + journal mutations across the worker pool.
     state_lock = threading.RLock()
 
+    # ── Phase 0 — interactive data exploration ───────────────────────────
+    # Run lightweight Python snippets against the actual data so the LLM
+    # sees real file listings, column stats, and distributions — not just
+    # the static heuristic preview.
+    prog.on_phase("explore", "Running interactive data exploration")
+    try:
+        exploration_report = run_exploration(interpreter, timeout=60.0)
+        if exploration_report:
+            # Cap to avoid prompt bloat — the static preview already covers basics.
+            max_explore = max(0, 4000 - len(data_preview))
+            if max_explore > 500:
+                trimmed = exploration_report[:max_explore]
+                data_preview = data_preview + "\n\n" + trimmed
+                logger.info(f"[runner] exploration report appended ({len(trimmed)} chars)")
+            else:
+                logger.info("[runner] skipping exploration injection — data_preview already large")
+    except Exception as e:
+        logger.warning(f"[runner] exploration failed (non-fatal): {e}")
+
     # ── Phase 1 — drafts in parallel ─────────────────────────────────────
+    prog.on_phase("drafts", f"Generating {cfg.search.num_drafts} diverse drafts")
     _phase_drafts(
         cfg=cfg,
         llm=llm,
@@ -172,8 +202,15 @@ def run_competition_candidates(work_dir: Path) -> list[bytes]:
         task_profile=task_profile,
     )
     _persist_journal(journal, workspace_dir)
+    # Report draft results.
+    stats = journal.stats()
+    prog.on_phase("drafts", f"Drafts done: {stats['valid']} valid, {stats['buggy']} buggy")
+    best = journal.best()
+    if best and best.val_score is not None:
+        prog.on_best(best.id, best.val_score, f"Best after drafts: {best.short()}")
 
     # ── Phase 2 — pipelined debug + improve ──────────────────────────────
+    prog.on_phase("search", f"Starting search (max {cfg.search.max_steps} steps)")
     _phase_search_parallel(
         cfg=cfg,
         llm=llm,
@@ -188,10 +225,12 @@ def run_competition_candidates(work_dir: Path) -> list[bytes]:
         workspace_dir=workspace_dir,
         task_type=task_type,
         task_profile=task_profile,
+        progress=prog,
     )
     _persist_journal(journal, workspace_dir)
 
-    # ── Phase 3 — pick best + ensemble + post-process ────────────────────
+    # ── Phase 3 — pick best candidates + post-process ────────────────────
+    prog.on_phase("finalize", "Selecting top single-model candidates")
     return _phase_finalize_candidates(
         cfg=cfg,
         journal=journal,
@@ -265,9 +304,13 @@ def _phase_drafts(
     _execute_in_parallel(
         cfg=cfg,
         interpreter=interpreter,
+        llm=llm,
         journal=journal,
         nodes=pending,
         budget=budget,
+        data_preview=data_preview,
+        task_profile_summary=task_profile_summary,
+        env_summary=env_summary,
         task_profile=task_profile,
     )
 
@@ -276,9 +319,13 @@ def _execute_in_parallel(
     *,
     cfg: SolverConfig,
     interpreter: Interpreter,
+    llm: LLMClient,
     journal: Journal,
     nodes: list[SearchNode],
     budget: TimeBudget,
+    data_preview: str = "",
+    task_profile_summary: str = "",
+    env_summary: str = "",
     task_profile: TaskProfile | None = None,
 ) -> None:
     if not nodes:
@@ -292,6 +339,11 @@ def _execute_in_parallel(
                 journal,
                 n,
                 cfg=cfg,
+                llm=llm,
+                budget=budget,
+                data_preview=data_preview,
+                task_profile_summary=task_profile_summary,
+                env_summary=env_summary,
                 task_profile=task_profile,
             ): n
             for n in nodes
@@ -321,6 +373,7 @@ def _phase_search_parallel(
     workspace_dir: Path,
     task_type: str = "tabular",
     task_profile: TaskProfile | None = None,
+    progress: ProgressCallback | None = None,
 ) -> None:
     """Run debug/improve operators in a pipelined worker pool.
 
@@ -413,6 +466,16 @@ def _phase_search_parallel(
                     f"[phase2] stats={stats} best_val={best_str} "
                     f"in_flight={len(in_flight)} remaining={fmt_seconds(budget.remaining())}"
                 )
+                # Fire progress callbacks.
+                if progress is not None:
+                    step_num = stats["total"]
+                    progress.on_step(
+                        step_num, max_steps,
+                        f"valid={stats['valid']} buggy={stats['buggy']} best={best_str} "
+                        f"remaining={fmt_seconds(budget.remaining())}",
+                    )
+                    if best and best.val_score is not None:
+                        progress.on_best(best.id, best.val_score, best.short())
             # Refill — keep workers fed.
             while len(in_flight) < max_parallel:
                 if not _spawn_one(ex):
@@ -473,7 +536,18 @@ def _step_worker(
             )
 
         try:
-            _execute_node(interpreter, journal, child, cfg=cfg, task_profile=task_profile)
+            _execute_node(
+                interpreter,
+                journal,
+                child,
+                cfg=cfg,
+                llm=llm,
+                budget=budget,
+                data_preview=data_preview,
+                task_profile_summary=task_profile_summary,
+                env_summary=env_summary,
+                task_profile=task_profile,
+            )
         except Exception as e:
             logger.exception(f"[phase2] execution raised on {child.id}: {e}")
             child.is_buggy = True
@@ -512,19 +586,10 @@ def _phase_finalize_candidates(
         return [fallback] if fallback is not None else []
 
     # Build the candidate list.
-    top_k_nodes = journal.top_k_by_val(k=cfg.search.ensemble_top_k)
-    top_k_paths: list[Path] = []
-    top_k_holdout: list[float | None] = []
-
-    for n in top_k_nodes:
-        path = n.submission_path()
-        if path is None:
-            continue
-        top_k_paths.append(path)
-        top_k_holdout.append(n.holdout_score)
+    top_k_nodes = journal.top_k_by_val(k=cfg.search.final_candidate_top_k)
 
     logger.info(
-        f"[phase3] top-{len(top_k_paths)} candidates: "
+        f"[phase3] top-{len(top_k_nodes)} single-model candidates: "
         + ", ".join(
             f"{n.id}={n.val_score:.5f}{'(suspicious)' if n.is_suspicious else ''}"
             if n.val_score is not None
@@ -533,32 +598,7 @@ def _phase_finalize_candidates(
         )
     )
 
-    # Try to blend.
-    blended: bytes | None = None
-    maximize = journal.maximize
-    if len(top_k_paths) >= 2:
-        try:
-            blended = blend_submissions(
-                top_k_paths,
-                holdout_scores=top_k_holdout,
-                objective_hint=(task_profile.objective if task_profile is not None else ""),
-                metric_hint=(task_profile.metric_name if task_profile is not None else ""),
-                prediction_mode=(task_profile.prediction_mode if task_profile is not None else ""),
-                maximize=maximize,
-            )
-        except Exception as e:
-            logger.exception(f"[phase3] blending failed: {e}")
-            blended = None
-
     candidates: list[bytes] = []
-    if blended is not None:
-        logger.info("[phase3] blended submission added as primary candidate")
-        try:
-            candidates.append(patch_submission_columns(blended, data_dir))
-        except Exception as e:
-            logger.exception(f"[phase3] blended candidate patching raised: {e}")
-            candidates.append(blended)
-
     for best in top_k_nodes:
         logger.info(
             f"[phase3] adding single-model candidate: {best.id} (val={best.val_score})"
@@ -635,6 +675,11 @@ def _execute_node(
     node: SearchNode,
     *,
     cfg: SolverConfig | None = None,
+    llm: LLMClient | None = None,
+    budget: TimeBudget | None = None,
+    data_preview: str = "",
+    task_profile_summary: str = "",
+    env_summary: str = "",
     task_profile: TaskProfile | None = None,
 ) -> None:
     """Execute a node, parse scores, decide validity, append to journal."""
@@ -644,13 +689,34 @@ def _execute_node(
         journal.add(node)
         return
 
-    try:
-        result = interpreter.run(node.code, node.id)
-    except Exception as e:
-        logger.exception(f"[exec] interpreter raised on {node.id}: {e}")
-        node.is_buggy = True
-        journal.add(node)
-        return
+    parent_state_path: Path | None = None
+    session_parent_node_id: str | None = None
+    if node.parent_id is not None:
+        parent = journal.parent_of(node)
+        if (
+            parent is not None
+            and parent.result is not None
+            and parent.result.is_success
+            and not parent.is_buggy
+            and parent.result.session_state_path is not None
+            and parent.result.session_state_path.exists()
+        ):
+            parent_state_path = parent.result.session_state_path
+            session_parent_node_id = parent.id
+
+    result = _run_node_with_repairs(
+        interpreter=interpreter,
+        node=node,
+        parent_state_path=parent_state_path,
+        session_parent_node_id=session_parent_node_id,
+        cfg=cfg,
+        llm=llm,
+        budget=budget,
+        data_preview=data_preview,
+        task_profile_summary=task_profile_summary,
+        env_summary=env_summary,
+        task_profile=task_profile,
+    )
 
     node.result = result
 
@@ -674,6 +740,8 @@ def _execute_node(
         node.is_buggy = True
         journal.add(node)
         return
+
+    _patch_submission_in_place(node, interpreter)
 
     parsed = parse_scores(result.stdout + "\n" + result.stderr)
     if parsed.maximize is None and task_profile is not None and task_profile.maximize is not None:
@@ -711,12 +779,12 @@ def _execute_node(
     # the LLM wrapped its training in a try/except that, on failure, writes a
     # constant prediction (e.g. all True for binary classification) and prints
     # a placeholder val=0.5 / holdout=0.5. We aggressively reject these so
-    # they don't pollute the top-K and the ensemble.
+    # they don't pollute the top-K candidate list.
     fake_reason = _detect_fake_success(node, parsed)
     if fake_reason is not None:
         logger.warning(
             f"[exec] node {node.id} FAKE success rejected: {fake_reason}. "
-            f"Marking as buggy so it isn't ensembled."
+            f"Marking as buggy so it is not selected as a final candidate."
         )
         node.is_buggy = True
         # Stuff the reason into the result.error_summary so the debug operator
@@ -760,6 +828,162 @@ def _execute_node(
         )
 
     journal.add(node)
+
+
+def _run_node_with_repairs(
+    *,
+    interpreter: Interpreter,
+    node: SearchNode,
+    parent_state_path: Path | None,
+    session_parent_node_id: str | None,
+    cfg: SolverConfig | None,
+    llm: LLMClient | None,
+    budget: TimeBudget | None,
+    data_preview: str,
+    task_profile_summary: str,
+    env_summary: str,
+    task_profile: TaskProfile | None,
+):
+    if cfg is None or llm is None:
+        return _run_node_once(
+            interpreter=interpreter,
+            node=node,
+            parent_state_path=parent_state_path,
+            session_parent_node_id=session_parent_node_id,
+        )
+
+    max_repairs = max(0, cfg.search.inline_repair_attempts)
+    for attempt in range(max_repairs + 1):
+        result = _run_node_once(
+            interpreter=interpreter,
+            node=node,
+            parent_state_path=parent_state_path,
+            session_parent_node_id=session_parent_node_id,
+        )
+        repair_reason = _repair_reason_for_result(
+            node=node,
+            result=result,
+            interpreter=interpreter,
+            task_profile=task_profile,
+        )
+        if repair_reason is None or attempt >= max_repairs:
+            return result
+        if budget is not None and not budget.can_spawn_step():
+            logger.info(f"[exec] skipping inline repair for {node.id}: time budget too low")
+            return result
+
+        messages = build_repair_prompt(
+            code=node.code,
+            error_summary=repair_reason,
+            cleaned_log=result.cleaned_log(max_chars=6000),
+            time_remaining=budget.remaining() if budget is not None else 0.0,
+            repair_attempt=attempt + 1,
+            total_repairs=max_repairs,
+            data_preview=data_preview,
+            task_profile_summary=task_profile_summary,
+            task_profile=task_profile,
+            env_summary=env_summary,
+        )
+        response = llm.chat(
+            messages,
+            temperature=max(0.1, cfg.llm.temperature * 0.5),
+            label=f"repair<-{node.id}/attempt{attempt+1}",
+        )
+        repaired_code = llm.extract_python_code(response)
+        if not repaired_code:
+            logger.warning(f"[exec] inline repair returned no code for {node.id}")
+            return result
+        if repaired_code.strip() == node.code.strip():
+            logger.info(f"[exec] inline repair for {node.id} returned unchanged code")
+            return result
+
+        node.code = repaired_code
+        node.plan = llm.extract_first_paragraph(response) or node.plan
+        node.strategies = set(node.strategies or set()) | collect_strategies(response, node.code)
+        node.summary = f"Inline repair of {node.id}: {repair_reason[:120]}"
+        logger.info(
+            f"[exec] inline repair {attempt+1}/{max_repairs} prepared for {node.id}: "
+            f"{repair_reason}"
+        )
+
+    return _run_node_once(
+        interpreter=interpreter,
+        node=node,
+        parent_state_path=parent_state_path,
+        session_parent_node_id=session_parent_node_id,
+    )
+
+
+def _run_node_once(
+    *,
+    interpreter: Interpreter,
+    node: SearchNode,
+    parent_state_path: Path | None,
+    session_parent_node_id: str | None,
+):
+    try:
+        return interpreter.run(
+            node.code,
+            node.id,
+            parent_state_path=parent_state_path,
+            session_parent_node_id=session_parent_node_id,
+        )
+    except Exception as e:
+        logger.exception(f"[exec] interpreter raised on {node.id}: {e}")
+        from .interpreter import ExecResult
+
+        return ExecResult(
+            return_code=-1,
+            stdout="",
+            stderr=f"InterpreterError: {type(e).__name__}: {e}",
+            duration_seconds=0.0,
+            timed_out=False,
+            submission_path=None,
+            session_state_path=None,
+            error_summary=f"InterpreterError: {type(e).__name__}: {e}",
+        )
+
+
+def _repair_reason_for_result(
+    *,
+    node: SearchNode,
+    result,
+    interpreter: Interpreter,
+    task_profile: TaskProfile | None,
+) -> str | None:
+    if not result.is_success:
+        return result.error_summary or "ExecutionFailed: solution.py did not run successfully"
+    if not result.has_submission:
+        return "MissingSubmission: script ran but did not create submission.csv"
+
+    node.result = result
+    _patch_submission_in_place(node, interpreter)
+    if not _submission_shape_ok(node, interpreter):
+        return (
+            "SubmissionSchemaMismatch: submission.csv still does not match "
+            "sample_submission.csv after patching"
+        )
+
+    parsed = parse_scores(result.stdout + "\n" + result.stderr)
+    if parsed.maximize is None and task_profile is not None and task_profile.maximize is not None:
+        parsed.maximize = task_profile.maximize
+    if parsed.val_score is None:
+        return "MissingValScore: submission was produced but FINAL VAL SCORE was missing or unparsable"
+    return None
+
+
+def _patch_submission_in_place(node: SearchNode, interpreter: Interpreter) -> None:
+    sub_path = node.submission_path()
+    if sub_path is None or not sub_path.exists():
+        return
+    try:
+        original = sub_path.read_bytes()
+        patched = patch_submission_columns(original, interpreter.data_dir)
+        if patched != original:
+            sub_path.write_bytes(patched)
+            logger.info(f"[exec] node {node.id} submission patched against sample_submission")
+    except Exception as e:
+        logger.debug(f"[exec] submission patching skipped for {node.id}: {e}")
 
 
 def _detect_fake_success(node: SearchNode, parsed) -> str | None:
@@ -1107,6 +1331,11 @@ def _persist_journal(journal: Journal, workspace_dir: Path) -> None:
                     "submission": (
                         str(n.result.submission_path)
                         if n.result and n.result.submission_path
+                        else None
+                    ),
+                    "session_state": (
+                        str(n.result.session_state_path)
+                        if n.result and n.result.session_state_path
                         else None
                     ),
                 }

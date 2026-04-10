@@ -3,7 +3,7 @@
 ## Models
 
 **LightGBM** — fastest, robust defaults, best for high-cardinality categoricals.
-Does NOT accept strings — encode with `pd.factorize` on joint train+test first.
+Does NOT accept raw strings in this solver — build a fully numeric matrix first.
 ```python
 cat_cols = [c for c in X.columns if X[c].dtype == 'object']
 for c in cat_cols:
@@ -31,6 +31,16 @@ params = dict(n_estimators=5000, learning_rate=0.02, max_depth=6, min_child_weig
               tree_method='hist', random_state=42, n_jobs=-1)
 ```
 
+## Model-family contract
+
+- CatBoost may consume raw string categoricals through `cat_features`.
+- LightGBM, XGBoost, HistGBM, ExtraTrees, RandomForest, linear models, SVMs, and KNNs must receive fully numeric feature matrices.
+- When switching from CatBoost to a numeric-only model, rebuild `X_train/X_valid/X_test` from raw frames; do not reuse stale session matrices.
+- Fill missing values before encoding. Avoid pandas `Categorical` mutation patterns that later break on `fillna('Unknown')`.
+- Do not use pandas nullable BooleanDtype for feature columns if you later fill with `'missing'`/`'Unknown'` or feed them to encoders.
+- Before `OneHotEncoder`, `LabelEncoder`, or `pd.factorize`, cast bool/object/category feature columns to string and fill missing so the encoder sees one uniform dtype.
+- Before fitting a numeric-only model, assert no object/category dtypes remain.
+
 ## Cross-validation
 
 | Data type | CV scheme |
@@ -50,6 +60,30 @@ CV must mirror the train/test relationship. If test was stratified, use stratifi
 dt = pd.to_datetime(df[col], errors='coerce')
 df[col+'_year'] = dt.dt.year; df[col+'_month'] = dt.dt.month
 df[col+'_dow'] = dt.dt.dayofweek; df[col+'_hour'] = dt.dt.hour
+```
+
+**Boolean cleanup** (`fe:boolean_cleanup`):
+```python
+bool_map = {'true': 1, 'false': 0, 'yes': 1, 'no': 0, 'y': 1, 'n': 0}
+for col in bool_like_cols:
+    s = df[col].astype(str).str.strip().str.lower()
+    df[col] = s.map(bool_map).fillna(-1).astype('int8')
+```
+
+**Missing indicators** (`fe:missing_indicators`):
+```python
+for col in cols_with_missing:
+    train[col + '_isna'] = train[col].isna().astype('int8')
+    test[col + '_isna'] = test[col].isna().astype('int8')
+```
+
+**Identifier/composite parsing** (`fe:id_parsing`):
+Only do this when the column visibly contains structured subparts such as delimiters,
+prefixes, suffixes, or repeated group/member patterns.
+```python
+parts = df[col].astype(str).str.split(r'[-_/ ]+', expand=True)
+for i in range(parts.shape[1]):
+    df[f'{col}_part{i}'] = parts[i].fillna('missing')
 ```
 
 **Target encoding OOF** (`fe:target_encoding_oof`):
@@ -98,6 +132,22 @@ for cat_col in cat_cols:
         test = test.merge(agg, on=cat_col, how='left')
 ```
 
+**Row-wise totals / ratios** (`fe:row_stats`, `fe:ratio_diff`):
+Only use these when the numeric columns describe related quantities on the same row.
+```python
+subset = num_cols[:4]
+train['row_sum'] = train[subset].sum(axis=1)
+train['row_mean'] = train[subset].mean(axis=1)
+train['row_std'] = train[subset].std(axis=1)
+test['row_sum'] = test[subset].sum(axis=1)
+test['row_mean'] = test[subset].mean(axis=1)
+test['row_std'] = test[subset].std(axis=1)
+if len(subset) >= 2:
+    a, b = subset[:2]
+    train[f'{a}_to_{b}'] = train[a] / (train[b].abs() + 1e-8)
+    test[f'{a}_to_{b}'] = test[a] / (test[b].abs() + 1e-8)
+```
+
 ## Hyperparameter tuning (`hp:optuna`)
 
 ```python
@@ -118,23 +168,14 @@ study = optuna.create_study(direction='maximize')
 study.optimize(objective, n_trials=30, timeout=300)
 ```
 
-## Ensembling
+## Single-model iteration
 
-**Seed averaging** (`ensemble:seed_averaging`): Train same model with 5 seeds, average predictions.
-```python
-preds = np.zeros(len(test))
-for seed in [42, 123, 456, 789, 1024]:
-    model = LGBMClassifier(**params, random_state=seed)
-    model.fit(X, y); preds += model.predict_proba(X_test)[:,1] / 5
-```
+Before reaching for ensembles, exhaust these higher-signal single-model moves:
 
-**CV fold averaging** (`ensemble:cv_fold_averaging`): Average per-fold test predictions.
-
-**Stacking** (`ensemble:stacking`): Train a meta-model (logistic regression / ridge) on
-OOF predictions from base models (LightGBM, CatBoost, XGBoost).
-
-**Rank averaging** (`ensemble:rank_average`): `pd.Series(preds).rank(pct=True)` per model,
-then average ranks. Robust to miscalibration across models.
+- Swap model family based on the schema: CatBoost for raw string categoricals, LightGBM/XGBoost for encoded tables, and only use other sklearn tabular models after the matrix is fully numeric.
+- Revisit validation before tuning. Bad CV will make every model choice look noisy.
+- Add missing indicators, frequency encodings, safe string splits, and row/group features only when they are supported by the visible schema.
+- Tune one model carefully with early stopping and honest OOF validation before trying a different family.
 
 ## Post-processing
 
@@ -149,9 +190,8 @@ for t in np.arange(0.3, 0.7, 0.01):
 
 ## Common pitfalls
 
-- Never use `astype('category')` — use `astype(str).fillna('missing')` instead.
 - Never feed string columns to StandardScaler or numeric models without encoding.
 - Never fit encoders on test labels. Use `pd.factorize` on joint train+test.
 - Never call `.astype(int)` on `'True'`/`'False'` strings — use `.map({'True':1,'False':0})`.
-- Drop ID columns and the target from features before fitting.
+- Drop raw ID columns and the target from features before fitting, unless you intentionally derived leakage-safe subfeatures from a structured identifier.
 - Use `predict_proba()` not `predict()` for probability-based metrics (AUC, logloss).

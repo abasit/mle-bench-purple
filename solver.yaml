@@ -13,7 +13,7 @@ agent:
     model: Qwen/Qwen3-Coder-480B-A35B-Instruct
     base_url: "https://api.tokenfactory.nebius.com/v1"
     api_key: ""
-    temp: 0.7
+    temp: 0.6
     max_tokens: 16000
     timeout: 240
     max_retries: 3
@@ -25,16 +25,17 @@ agent:
 
   # ── Search ────────────────────────────────────────────────
   search:
-    num_drafts: 3              # initial parallel drafts (variants 0/1/2)
-    max_steps: 100              # total nodes to generate (drafts + debug + improve)
-    max_parallel: 3            # concurrent worker pool size for phase 2
+    num_drafts: 2              # initial parallel drafts (variants 0/1)
+    max_steps: 30              # total nodes to generate (drafts + debug + improve)
+    max_parallel: 2            # concurrent worker pool size for phase 2
     max_debug_attempts_per_node: 2  # per-node cap (lineage cap of 4 also applies)
-    improve_top_k: 3           # rotate improves over the top-K validated nodes
-    ensemble_top_k: 3          # blend top-K at the very end
+    improve_top_k: 2           # rotate improves over the top-K validated nodes
+    final_candidate_top_k: 2   # keep the top-K single-model candidates at the end
+    inline_repair_attempts: 1  # bounded generate-run-fix loop before declaring a node buggy
     grace_seconds: 180         # don't spawn new steps with less than this remaining
     holdout_gap_rel_threshold: 0.20  # relative |val-holdout| / max(|val|,|holdout|,0.01)
     metric_improve_eps: 0.0001
-    fold_variance_rel_threshold: 0.20
+    fold_variance_rel_threshold: 0.15
     identical_score_abs_tol: 0.000001
     perfect_score_abs_tol: 0.000001
 

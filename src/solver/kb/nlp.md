@@ -38,7 +38,7 @@ args = TrainingArguments(
 
 ## Tricks
 
-**Pseudo-labeling**: Train ensemble → predict test → keep confident (>0.95) → retrain.
+**Pseudo-labeling**: Train the current model → predict test → keep confident (>0.95) rows → retrain.
 
 **Layer-wise LR decay**: Lower layers get smaller LR (multiply by 0.9 per layer).
 
