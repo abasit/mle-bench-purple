@@ -1,0 +1,12 @@
+{
+  "metric": "auc",
+  "maximize": true,
+  "target_col": "target",
+  "id_col": "id",
+  "category": "tabular",
+  "n_folds": 3,
+  "holdout_fraction": 0.2,
+  "seed": 42,
+  "train_filename": "train.csv",
+  "split_csv": "_splits.csv"
+}

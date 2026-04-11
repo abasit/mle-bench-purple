@@ -65,6 +65,7 @@ def review_candidate(
     cv_score: float | None,
     holdout_score: float | None,
     label: str,
+    temperature: float | None = None,
 ) -> ReviewVerdict:
     cv_s = f"{cv_score:.5f}" if cv_score is not None else "N/A"
     ho_s = f"{holdout_score:.5f}" if holdout_score is not None else "N/A"
@@ -89,6 +90,7 @@ def review_candidate(
     try:
         response = llm.chat(
             [{"role": "system", "content": _SYS}, {"role": "user", "content": user}],
+            temperature=temperature,
             label=label,
         )
     except Exception as e:

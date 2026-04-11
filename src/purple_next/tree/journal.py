@@ -93,6 +93,7 @@ class Journal:
                 "is_buggy": n.is_buggy,
                 "is_suspicious": n.is_suspicious,
                 "review_verdict": n.review_verdict,
+                "review_confidence": n.review_confidence,
                 "review_reasons": list(n.review_reasons),
                 "suspicion_reasons": list(n.suspicion_reasons),
                 "improve_hint_index": n.improve_hint_index,

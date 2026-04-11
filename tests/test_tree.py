@@ -5,6 +5,7 @@ import random
 from purple_next.exec.interpreter import ExecResult
 from purple_next.prompts.improve import IMPROVE_HINTS, pick_hint
 from purple_next.tree import Journal, SearchNode, Selector
+from purple_next.tree.ranking import adjusted_review_penalty, hard_leakage_flag, review_penalty
 
 
 def _valid_node(node_id, stage, parent_id, branch_root, cv, hold=None, hint_idx=None):
@@ -113,3 +114,60 @@ def test_pick_hint_cold_start_returns_untried_indices_first():
     j._nodes = [parent, child]
     j._by_id = {"d001": parent, "i002": child}
     assert pick_hint(j, rng=rng) == 1
+
+
+def test_review_penalty_is_confidence_aware():
+    assert review_penalty("clean", "high") == 0.0
+    assert review_penalty("suspicious", "low") == 0.0
+    assert review_penalty("suspicious", "medium") > 0.0
+    assert review_penalty("leaky", "high") > review_penalty("leaky", "low")
+
+
+def test_adjusted_review_penalty_uses_score_margin_guard():
+    top = SearchNode(id="i001", stage="improve", code="x")
+    top.review_verdict = "suspicious"
+    top.review_confidence = "high"
+    top.holdout_score = 0.90
+    top.cv_score = 0.88
+
+    other_a = SearchNode(id="i002", stage="improve", code="x")
+    other_a.review_verdict = "clean"
+    other_a.review_confidence = "high"
+    other_a.holdout_score = 0.84
+    other_a.cv_score = 0.82
+
+    other_b = SearchNode(id="i003", stage="improve", code="x")
+    other_b.review_verdict = "clean"
+    other_b.review_confidence = "high"
+    other_b.holdout_score = 0.83
+    other_b.cv_score = 0.81
+
+    peers = [top, other_a, other_b]
+    assert review_penalty(top.review_verdict, top.review_confidence) > 0.0
+    assert adjusted_review_penalty(top, peers, maximize=True) == 0.0
+
+
+def test_adjusted_review_penalty_keeps_penalty_without_dual_margin():
+    suspect = SearchNode(id="i001", stage="improve", code="x")
+    suspect.review_verdict = "suspicious"
+    suspect.review_confidence = "medium"
+    suspect.holdout_score = 0.90
+    suspect.cv_score = 0.81
+
+    other = SearchNode(id="i002", stage="improve", code="x")
+    other.review_verdict = "clean"
+    other.review_confidence = "high"
+    other.holdout_score = 0.84
+    other.cv_score = 0.82
+
+    peers = [suspect, other]
+    assert adjusted_review_penalty(suspect, peers, maximize=True) == review_penalty(
+        suspect.review_verdict, suspect.review_confidence
+    )
+
+
+def test_hard_leakage_flag_demotes_only_explicit_leaks():
+    assert hard_leakage_flag("leaky", "high") == 1
+    assert hard_leakage_flag("leaky", "medium") == 1
+    assert hard_leakage_flag("leaky", "low") == 0
+    assert hard_leakage_flag("suspicious", "high") == 0

@@ -31,6 +31,7 @@ class SearchNode:
     is_suspicious: bool = False
     suspicion_reasons: list[str] = field(default_factory=list)
     review_verdict: str = ""            # "clean" | "suspicious" | "leaky" | ""
+    review_confidence: str = ""         # "low" | "medium" | "high" | ""
     review_reasons: list[str] = field(default_factory=list)
     debug_attempts: int = 0
 
@@ -59,5 +60,6 @@ class SearchNode:
         if self.is_buggy:
             flag = " [BUGGY]"
         elif self.is_suspicious or self.review_verdict in {"suspicious", "leaky"}:
-            flag = f" [{self.review_verdict or 'SUSPECT'}]"
+            conf = f"/{self.review_confidence}" if self.review_confidence else ""
+            flag = f" [{self.review_verdict or 'SUSPECT'}{conf}]"
         return f"{self.id}({self.stage} cv={cv} hold={ho}{flag})"
