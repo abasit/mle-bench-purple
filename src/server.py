@@ -1,5 +1,8 @@
 import argparse
+from pathlib import Path
+
 import uvicorn
+from dotenv import load_dotenv
 
 from a2a.server.apps import A2AStarletteApplication
 from a2a.server.request_handlers import DefaultRequestHandler
@@ -11,6 +14,8 @@ from a2a.types import (
 )
 
 from executor import Executor
+
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 
 def main():

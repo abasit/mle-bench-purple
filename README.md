@@ -1,6 +1,6 @@
 # MLE-Bench Purple Agent
 
-A purple agent for the [AgentX-AgentBeats](https://rdi.berkeley.edu/agentx-agentbeats.html) competition that solves [MLE-bench](https://github.com/openai/mle-bench) Kaggle competitions.
+A purple agent that solves [MLE-bench](https://github.com/openai/mle-bench) Kaggle-style competitions.
 
 ## Prerequisites
 
@@ -91,8 +91,8 @@ This sends an assessment request to the green agent, which downloads the competi
 src/
 ├── server.py      # A2A server config and agent card
 ├── agent.py       # Agent logic (this is where the work happens)
-├── executor.py    # A2A request handling (from template)
-└── messenger.py   # A2A messaging utilities (from template)
+├── executor.py    # A2A request handling
+└── messenger.py   # A2A messaging utilities
 ```
 
 ### Validation
@@ -112,4 +112,4 @@ docker run -p 9010:9010 mle-bench-purple --host 0.0.0.0 --port 9010
 
 ## Project Structure
 
-Based on the [RDI Foundation agent template](https://github.com/RDI-Foundation/agent-template).
+Built as an A2A-compatible competition-solving agent.

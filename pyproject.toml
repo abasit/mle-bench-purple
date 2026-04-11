@@ -9,16 +9,8 @@ dependencies = [
     "a2a-sdk[http-server]>=0.3.20",
     "uvicorn>=0.38.0",
 
-    # solver control plane
-    "omegaconf>=2.3.0",
-    "coolname>=2.2.0",
-    "shutup>=0.2.0",
-    "rich>=13.7.0",
-    "humanize>=4.8.0",
-    "dataclasses-json>=0.6.7",
-    "python-dotenv>=1.0.1",
-
     # LLM backends
+    "python-dotenv>=1.0.1",
     "openai>=1.66.3",
     "google-genai>=1.51.0",
     "backoff>=2.2.1",

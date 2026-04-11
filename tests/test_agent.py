@@ -1,7 +1,8 @@
 from typing import Any
-import pytest
-import httpx
 from uuid import uuid4
+
+import httpx
+import pytest
 
 from a2a.client import A2ACardResolver, ClientConfig, ClientFactory
 from a2a.types import Message, Part, Role, TextPart
@@ -13,7 +14,6 @@ def validate_agent_card(card_data: dict[str, Any]) -> list[str]:
     """Validate the structure and fields of an agent card."""
     errors: list[str] = []
 
-    # Use a frozenset for efficient checking and to indicate immutability.
     required_fields = frozenset(
         [
             'name',
@@ -27,12 +27,10 @@ def validate_agent_card(card_data: dict[str, Any]) -> list[str]:
         ]
     )
 
-    # Check for the presence of all required fields
     for field in required_fields:
         if field not in card_data:
             errors.append(f"Required field is missing: '{field}'.")
 
-    # Check if 'url' is an absolute URL (basic check)
     if 'url' in card_data and not (
         card_data['url'].startswith('http://')
         or card_data['url'].startswith('https://')
@@ -41,13 +39,11 @@ def validate_agent_card(card_data: dict[str, Any]) -> list[str]:
             "Field 'url' must be an absolute URL starting with http:// or https://."
         )
 
-    # Check if capabilities is a dictionary
     if 'capabilities' in card_data and not isinstance(
         card_data['capabilities'], dict
     ):
         errors.append("Field 'capabilities' must be an object.")
 
-    # Check if defaultInputModes and defaultOutputModes are arrays of strings
     for field in ['defaultInputModes', 'defaultOutputModes']:
         if field in card_data:
             if not isinstance(card_data[field], list):
@@ -55,7 +51,6 @@ def validate_agent_card(card_data: dict[str, Any]) -> list[str]:
             elif not all(isinstance(item, str) for item in card_data[field]):
                 errors.append(f"All items in '{field}' must be strings.")
 
-    # Check skills array
     if 'skills' in card_data:
         if not isinstance(card_data['skills'], list):
             errors.append(
@@ -170,6 +165,7 @@ def test_agent_card(agent):
 
     assert not errors, f"Agent card validation failed:\n" + "\n".join(errors)
 
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streaming", [True, False])
 async def test_message(agent, streaming):
@@ -195,5 +191,3 @@ async def test_message(agent, streaming):
 
     assert events, "Agent should respond with at least one event"
     assert not all_errors, f"Message validation failed:\n" + "\n".join(all_errors)
-
-# Add your custom tests here

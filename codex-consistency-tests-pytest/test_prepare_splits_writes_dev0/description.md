@@ -1,0 +1,1 @@
+Binary classification. Metric: AUC. Higher is better.

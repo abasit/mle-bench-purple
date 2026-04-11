@@ -1,0 +1,37 @@
+# ============================================================
+#  purple_next configuration
+#
+#  Read by ``purple_next.config.Config.from_yaml``. Intentionally flat and
+#  small — the runner owns the validation protocol, so there's no per-audit
+#  threshold to tune.
+# ============================================================
+
+time_limit: 30600            # total wall-clock across all seats (~8.5h)
+seed: 42
+log_level: INFO
+
+llm:
+  model: Qwen/Qwen3.5-397B-A17B-fast
+  base_url: "https://api.tokenfactory.nebius.com/v1/"
+  api_key: ""                # pulled from NEBIUS_API_KEY/OPENAI_API_KEY if blank
+  temperature: 0.6
+  max_tokens: 16000
+  timeout: 600
+  max_retries: 3
+
+search:
+  num_drafts: 2              # sibling drafts per seat
+  max_steps: 30              # total nodes per seat (drafts + improve + debug)
+  max_parallel: 2            # pipelined workers inside one seat
+  pass_k: 3                  # number of isolated seats on the panel
+  ucb_explore_c: 1.0         # UCB exploration coefficient for branch selection
+  max_debug_attempts_per_node: 2
+  final_top_k: 3             # candidates reviewed + returned per seat
+  grace_seconds: 180         # don't spawn new work under this remaining
+  holdout_fraction: 0.20     # runner-owned dev/holdout split
+  n_folds: 3                 # cv folds across dev rows
+  dispositions: []           # override default speed/data-first/go-big triplet
+  seat_temperatures: [0.5, 0.6, 0.9]   # one per seat; falls back to llm.temperature if fewer than pass_k
+
+exec:
+  timeout: 1800              # per-node solution.py wall-clock cap
