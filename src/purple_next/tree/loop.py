@@ -274,6 +274,9 @@ class TreeLoop:
             self.journal.add(node)
             return
 
+        from ..exec.code_fix import fix_common_errors
+        node.code = fix_common_errors(node.code)
+
         try:
             result = self.interpreter.run(node.code, node.id)
         except Exception as e:

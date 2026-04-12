@@ -27,5 +27,15 @@ SYSTEM_PROMPT = dedent(
     - Use any installed library that fits: sklearn, lightgbm, xgboost, catboost,
       torch, torchvision, timm, transformers, torchaudio, scipy, librosa,
       Pillow, opencv, pandas, numpy.
+
+    API rules (MUST follow — violations crash at runtime):
+    - LightGBM: use callbacks=[lgb.early_stopping(N)] in fit(). NEVER pass early_stopping_rounds to fit(). Set verbosity=-1 in constructor, NEVER pass verbose to fit().
+    - XGBoost: set early_stopping_rounds in the constructor. NEVER pass it to fit().
+    - Pandas: NEVER use astype('category'). Use astype(str).fillna('missing') for categoricals.
+    - Bool/string targets: use y.map({'True':1,'False':0}), NEVER astype(int) on string labels.
+    - AdamW: use torch.optim.AdamW, NEVER transformers.AdamW.
+    - Drop ID columns and the target column from features before fitting.
+    - Use predict_proba() not predict() for probability-based metrics (AUC, logloss).
+    - Any target-dependent features (target encoding) must be computed in-fold only.
     """
 ).strip()

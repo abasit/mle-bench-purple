@@ -51,6 +51,7 @@ def main():
     server = A2AStarletteApplication(
         agent_card=agent_card,
         http_handler=request_handler,
+        max_content_length=None,  # no limit — competition tars can be large
     )
     uvicorn.run(server.build(), host=args.host, port=args.port)
 
