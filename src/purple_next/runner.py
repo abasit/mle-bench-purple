@@ -11,6 +11,7 @@ import logging
 from pathlib import Path
 
 from .config import Config
+from .ensemble import blend_submissions
 from .llm import LLMClient
 from .panel import PanelResult, run_panel
 from .protocol import SPLIT_CSV, PROTOCOL_JSON, infer_contract, prepare_splits
@@ -94,7 +95,21 @@ def run_competition(work_dir: Path) -> bytes | None:
         logger.warning("[runner] panel produced no candidates; returning sample submission")
         return _emergency_fallback(data_dir)
 
-    best = result.final_candidates[0]
+    # Try blending only clean/non-leaky candidates
+    candidates = result.final_candidates
+    clean = [n for n in candidates if n.review_verdict not in ("leaky",) and n.submission_path and n.submission_path.exists()]
+    if not clean:
+        clean = [n for n in candidates if n.submission_path and n.submission_path.exists()]
+    paths = [n.submission_path for n in clean]
+    holdouts = [n.holdout_score for n in clean]
+
+    if len(paths) >= 2:
+        blended = blend_submissions(paths, holdout_scores=holdouts, maximize=contract.maximize)
+        if blended is not None:
+            logger.info(f"[runner] shipping blended submission from {len(paths)} candidates")
+            return blended
+
+    best = candidates[0]
     sub_path = best.submission_path
     if sub_path is None or not sub_path.exists():
         logger.warning("[runner] best candidate has no submission file; falling back")
