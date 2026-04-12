@@ -21,7 +21,7 @@ llm:
 
 search:
   num_drafts: 2              # sibling drafts per seat
-  max_steps: 30              # total nodes per seat (drafts + improve + debug)
+  max_steps: 50              # total nodes per seat (drafts + improve + debug)
   max_parallel: 2            # pipelined workers inside one seat
   pass_k: 3                  # number of isolated seats on the panel
   ucb_explore_c: 1.0         # UCB exploration coefficient for branch selection
