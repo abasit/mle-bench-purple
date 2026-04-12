@@ -11,6 +11,7 @@ import logging
 from pathlib import Path
 
 from .config import Config
+from .llm import LLMClient
 from .panel import PanelResult, run_panel
 from .protocol import SPLIT_CSV, PROTOCOL_JSON, infer_contract, prepare_splits
 from .tree.loop import RunContext
@@ -46,8 +47,10 @@ def run_competition(work_dir: Path) -> bytes | None:
         return None
 
     # ── Runner-owned protocol ─────────────────────────────────────────────
+    llm = LLMClient(cfg.llm)
     contract = infer_contract(
         data_dir,
+        llm=llm,
         n_folds=cfg.search.n_folds,
         holdout_fraction=cfg.search.holdout_fraction,
         seed=cfg.seed,

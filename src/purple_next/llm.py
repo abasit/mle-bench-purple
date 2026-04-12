@@ -13,11 +13,7 @@ import re
 import threading
 import time
 
-from openai import OpenAI
-try:
-    from openai import APIError
-except Exception:  # pragma: no cover
-    APIError = Exception  # type: ignore
+from openai import OpenAI, APIError
 
 from .config import LLMConfig
 
@@ -56,7 +52,7 @@ class LLMClient:
             api_key=cfg.api_key or "missing-key",
             base_url=cfg.base_url,
             timeout=cfg.timeout,
-            max_retries=max(0, cfg.max_retries),
+            max_retries=0,  # we handle retries ourselves
         )
         self._legacy_max_tokens = False
         self._omit_temperature = False
@@ -72,20 +68,41 @@ class LLMClient:
         temp = self.cfg.temperature if temperature is None else temperature
         max_t = self.cfg.max_tokens if max_tokens is None else max_tokens
         started = time.time()
-        try:
-            content = self._call(messages, temp, max_t, label)
-        except APIError as e:
-            err = str(e)
-            if "max_tokens" in err and "max_completion_tokens" in err:
-                self._legacy_max_tokens = not self._legacy_max_tokens
+        last_err: Exception | None = None
+
+        for attempt in range(self.cfg.max_retries):
+            try:
                 content = self._call(messages, temp, max_t, label)
-            elif self._is_temp_rejection(err):
-                self._omit_temperature = True
-                content = self._call(messages, temp, max_t, label)
-            else:
-                raise
-        logger.info(f"[llm] <- {label} OK in {time.time() - started:.0f}s chars={len(content)}")
-        return content
+                logger.info(f"[llm] <- {label} OK in {time.time() - started:.0f}s chars={len(content)}")
+                return content
+            except APIError as e:
+                err = str(e)
+                if "max_tokens" in err and "max_completion_tokens" in err:
+                    self._legacy_max_tokens = not self._legacy_max_tokens
+                    continue
+                if "temperature" in err.lower() and any(k in err.lower() for k in ("does not support", "only supports", "unsupported")):
+                    self._omit_temperature = True
+                    continue
+                last_err = e
+                wait = min(2 ** attempt, 20)
+                logger.warning(
+                    f"[llm] {label} attempt {attempt+1}/{self.cfg.max_retries} "
+                    f"failed: {type(e).__name__}: {e} — sleeping {wait}s"
+                )
+                time.sleep(wait)
+            except RuntimeError as e:
+                last_err = e
+                wait = min(2 ** attempt, 20)
+                logger.warning(
+                    f"[llm] {label} attempt {attempt+1}/{self.cfg.max_retries} "
+                    f"RuntimeError: {e} — sleeping {wait}s"
+                )
+                time.sleep(wait)
+
+        raise RuntimeError(
+            f"[llm] {label} failed after {self.cfg.max_retries} attempts "
+            f"in {time.time() - started:.0f}s: {last_err}"
+        )
 
     def _call(self, messages, temperature, max_tokens, label):
         kwargs = (
@@ -99,37 +116,21 @@ class LLMClient:
             resp = self.client.chat.completions.create(
                 model=self.cfg.model, messages=messages, **kwargs  # type: ignore[arg-type]
             )
-        if not resp.choices:
-            raise RuntimeError("LLM returned no choices")
-        content = resp.choices[0].message.content or ""
-        if not content:
-            raise RuntimeError("LLM returned empty content")
-        return content
-
-    @staticmethod
-    def _is_temp_rejection(err: str) -> bool:
-        e = err.lower()
-        return "temperature" in e and ("does not support" in e or "only supports" in e or "unsupported" in e)
+        if not resp.choices or not resp.choices[0].message.content:
+            raise RuntimeError("LLM returned no content")
+        return resp.choices[0].message.content
 
     # ── code extraction ───────────────────────────────────────────────────
 
     _FENCED = re.compile(r"```\s*(?:python|py|python3)?\s*\n(.*?)\n\s*```", re.DOTALL | re.IGNORECASE)
-    _TILDE = re.compile(r"~~~(?:python|py)?\s*\n(.*?)\n\s*~~~", re.DOTALL | re.IGNORECASE)
     _PERMISSIVE = re.compile(r"```[^\n`]*?\n?(.*?)```", re.DOTALL)
 
     def extract_python_code(self, text: str) -> str:
         if not text:
             return ""
-        for pattern in (self._FENCED, self._TILDE, self._PERMISSIVE):
+        for pattern in (self._FENCED, self._PERMISSIVE):
             blocks = pattern.findall(text)
             if blocks:
                 substantive = [b for b in blocks if len(b.strip()) >= 30]
-                pick = max(substantive or blocks, key=len)
-                return self._cleanup(pick)
+                return max(substantive or blocks, key=len).strip()
         return ""
-
-    @staticmethod
-    def _cleanup(code: str) -> str:
-        code = re.sub(r"^\s*```[a-zA-Z0-9]*\s*\n", "", code)
-        code = re.sub(r"\n\s*```\s*$", "", code)
-        return code.strip("\n").strip()
