@@ -218,6 +218,7 @@ class TreeLoop:
             direction=self.ctx.direction_label,
             hint_index=hint_index,
             contract_summary=self.ctx.contract_summary,
+            data_preview=self.ctx.data_preview,
             time_remaining_s=self._remaining(),
             fraction_used=self._fraction_used(),
             temperature=self.cfg.llm.temperature,

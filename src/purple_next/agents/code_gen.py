@@ -52,6 +52,7 @@ def generate_improve_code(
     direction: str,
     hint_index: int,
     contract_summary: str,
+    data_preview: str = "",
     time_remaining_s: float,
     fraction_used: float,
     temperature: float | None,
@@ -65,6 +66,7 @@ def generate_improve_code(
         direction=direction,
         hint_index=hint_index,
         contract_summary=contract_summary,
+        data_preview=data_preview,
         time_remaining_s=time_remaining_s,
         fraction_used=fraction_used,
     )

@@ -79,6 +79,7 @@ def build_improve_prompt(
     direction: str,
     hint_index: int,
     contract_summary: str,
+    data_preview: str = "",
     time_remaining_s: float,
     fraction_used: float,
 ) -> list[dict[str, str]]:
@@ -87,6 +88,9 @@ def build_improve_prompt(
     stdout_block = ""
     if parent_stdout_tail.strip():
         stdout_block = "Parent run output (tail):\n```\n" + parent_stdout_tail.strip() + "\n```"
+    data_block = ""
+    if data_preview.strip():
+        data_block = f"Data preview:\n{data_preview.strip()}"
     user = dedent(
         f"""
         Improve this working solution. Return a complete new solution.py.
@@ -97,6 +101,8 @@ def build_improve_prompt(
 
         Protocol (runner-owned, still in force):
         {contract_summary}
+
+        {data_block}
 
         {stdout_block}
 

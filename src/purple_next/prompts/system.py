@@ -12,6 +12,7 @@ SYSTEM_PROMPT = dedent(
     - Data lives in ./input/. Write ./submission.csv at the workspace root.
     - The runner has written ./input/_splits.csv (columns: row_index, split, fold)
       and ./input/_protocol.json (metric, maximize, target_col, id_col, n_folds).
+      Example: row_index=0,split=dev,fold=0 | row_index=5,split=holdout,fold=-1
       Load both at the top of your script and FOLLOW the split assignment exactly.
       dev rows (split=="dev") are for CV training; holdout rows (split=="holdout")
       must never touch model fitting.

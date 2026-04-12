@@ -119,6 +119,13 @@ class Interpreter:
         if rc != 0 or timed_out:
             error_summary = _summarize_error(stderr)
 
+        # Save stdout/stderr to disk for post-run debugging.
+        try:
+            (node_dir / "stdout.txt").write_text(stdout, encoding="utf-8")
+            (node_dir / "stderr.txt").write_text(stderr, encoding="utf-8")
+        except Exception:
+            pass
+
         return ExecResult(
             return_code=rc,
             stdout=stdout,
