@@ -35,9 +35,11 @@ def build_debug_prompt(
     error_summary: str,
     log_tail: str,
     contract_summary: str,
+    data_preview: str = "",
     time_remaining_s: float,
 ) -> list[dict[str, str]]:
     error_class, fix_focus = classify_error(error_summary, log_tail)
+    data_block = f"Data preview:\n{data_preview.strip()}" if data_preview.strip() else ""
     user = dedent(
         f"""
         Fix this crashed solution. Return the complete corrected solution.py.
@@ -49,6 +51,8 @@ def build_debug_prompt(
 
         Protocol (runner-owned, still in force):
         {contract_summary}
+
+        {data_block}
 
         Log tail:
         ```

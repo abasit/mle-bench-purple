@@ -245,6 +245,7 @@ class TreeLoop:
             error_summary=parent.result.error_summary if parent.result else "",
             log_tail=log_tail,
             contract_summary=self.ctx.contract_summary,
+            data_preview=self.ctx.data_preview,
             time_remaining_s=self._remaining(),
             temperature=self.cfg.llm.temperature,
             label=f"debug<-{parent.id}",

@@ -82,6 +82,7 @@ def generate_debug_code(
     error_summary: str,
     log_tail: str,
     contract_summary: str,
+    data_preview: str = "",
     time_remaining_s: float,
     temperature: float | None,
     label: str,
@@ -91,6 +92,7 @@ def generate_debug_code(
         error_summary=error_summary,
         log_tail=log_tail,
         contract_summary=contract_summary,
+        data_preview=data_preview,
         time_remaining_s=time_remaining_s,
     )
     response = llm.chat(messages, temperature=temperature, label=label)
